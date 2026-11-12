@@ -343,11 +343,11 @@ async def process_article(message: Message, state: FSMContext):
     if offers:
         last_search[message.from_user.id] = offers
         
-        # Строим кнопки сеткой: по 2 штуки в ряду с брендом и ценой
+        # Строим кнопки сеткой: по 2 штуки в ряду (Бренд - Артикул - Цена)
         keyboard = []
         row = []
         for i, offer in enumerate(offers):
-            btn_text = f"{offer['brand']} ({offer['price']} ₽)"
+            btn_text = f"{offer['brand']} ({offer['article']}) — {offer['price']} ₽"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
             if len(row) == 2:
                 keyboard.append(row)
