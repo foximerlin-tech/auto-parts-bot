@@ -41,6 +41,28 @@ async def start_web_server():
     await site.start()
     print(f"🌐 Веб-сервер запущен на порту {port}")
 
+# --- КЛАССИФИКАТОР БРЕНДОВ ПО КАЧЕСТВУ ---
+PREMIUM_BRANDS = {
+    "BOSCH", "BREMBO", "SACHS", "KAYABA", "KYB", "MAHLE", "DENSO", "NGK", 
+    "SKF", "SNR", "TIMKEN", "ZIMMERMANN", "TEXTAR", "FAG", "LUK", "VALEO", 
+    "HENGST", "MANNE", "MANN", "MANN-FILTER", "BILSTEIN", "MONROE", "CONTITECH", "GATES"
+}
+
+MEDIUM_BRANDS = {
+    "FEBI", "LEMFORDER", "TRW", "CTR", "MEYLE", "INA", "DAYCO", "SIDEM", 
+    "NISSENS", "BEHR", "HELLA", "CORTECO", "VALEO", "SWAG", "VDO", "HERTH+BUSS"
+}
+
+def get_brand_tier(brand_name: str) -> int:
+    """Возвращает категорию: 1 - Премиум, 2 - Средний, 3 - Эконом"""
+    b_upper = brand_name.strip().upper()
+    if b_upper in PREMIUM_BRANDS:
+        return 1
+    elif b_upper in MEDIUM_BRANDS:
+        return 2
+    else:
+        return 3  # Все остальные (бюджетные / малоизвестные)
+
 # --- ПОИСК АВТО ПО VIN ---
 async def decode_vin_vpic(vin: str) -> str:
     url = f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json"
@@ -60,7 +82,7 @@ async def decode_vin_vpic(vin: str) -> str:
     if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
     return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
 
-# --- ПОИСК ЗАПЧАСТЕЙ С ДИФФЕРЕНЦИРОВАННОЙ НАЦЕНКОЙ (ТОЛЬКО ИНФОРМАЦИЯ) ---
+# --- ПОИСК ЗАПЧАСТЕЙ С РАСПРЕДЕЛЕНИЕМ ПО КАТЕГОРИЯМ КАЧЕСТВА ---
 async def search_part_api(requested_article: str):
     url_products = "https://api.pr-lg.ru/search/products"
     url_crosses = "https://api.pr-lg.ru/search/crosses"
@@ -141,13 +163,17 @@ async def search_part_api(requested_article: str):
                     except: 
                         price = str(raw_price)
                     
+                    brand_name = item_data.get("brand", "Бренд")
+                    tier = get_brand_tier(brand_name)
+
                     return {
                         "article": item_data.get("article", "Неизвестно"),
-                        "brand": item_data.get("brand", "Бренд"),
+                        "brand": brand_name,
                         "name": item_data.get("description", "Деталь"),
                         "price": price,
                         "stock": best_prod.get("quantity", "0"),
                         "delivery": best_prod.get("show_date", "Не указан"),
+                        "tier": tier,
                         "is_own": is_own,
                         "delivery_hours": delivery_hours,
                         "raw_price": float(raw_price) if raw_price else float('inf')
@@ -181,33 +207,42 @@ async def search_part_api(requested_article: str):
                     answer += f"{profit_star}<b>{best_exact['brand']}</b> (<code>{best_exact['article']}</code>)\n"
                     answer += f"<i>{best_exact['name']}</i>\n"
                     answer += f"➖➖➖➖➖➖➖➖➖➖\n"
-                    answer += f"💰 Цена: <b>{best_exact['price']} ₽</b>\n"
-                    answer += f"📦 Наличие: <b>{best_exact['stock']} шт.</b>\n"
-                    answer += f"🚚 Доставка: <b>{best_exact['delivery']}</b>\n\n"
+                    answer += f"💰 Цена: <b>{best_exact['price']} ₽</b>  |  📦 {best_exact['stock']} шт.  |  🚚 {best_exact['delivery']}\n\n"
                 
                 processed_analogs = []
                 for an in analogs:
                     best_an = get_best_offer(an)
                     if best_an: processed_analogs.append(best_an)
                 
-                processed_analogs.sort(key=lambda x: (x['is_own'], x['delivery_hours'], x['raw_price']))
+                # Сортируем: сначала по качеству (tier), потом по складу/цене
+                processed_analogs.sort(key=lambda x: (x['tier'], x['is_own'], x['delivery_hours'], x['raw_price']))
                 
-                added_analogs = 0
-                analog_text = ""
+                tier_names = {
+                    1: "🏆 ПРЕМИУМ БРЕНДЫ",
+                    2: "⚖️ СРЕДНИЙ СЕГМЕНТ",
+                    3: "💰 ЭКОНОМ / БЮДЖЕТ"
+                }
                 
-                for best_an in processed_analogs:
-                    if added_analogs >= 7: break 
-                    has_offers = True
-                    profit_star = "⭐ " if best_an.get("is_own") == 0 else "▫️ "
+                grouped = {1: [], 2: [], 3: []}
+                for an in processed_analogs:
+                    grouped[an['tier']].append(an)
+                
+                for tier_id in [1, 2, 3]:
+                    tier_items = grouped[tier_id]
+                    if not tier_items: continue
                     
-                    analog_text += f"{profit_star}<b>{best_an['brand']}</b> (<code>{best_an['article']}</code>)\n"
-                    analog_text += f"<i>{best_an['name']}</i>\n"
-                    analog_text += f"💰 <b>{best_an['price']} ₽</b>  |  📦 {best_an['stock']} шт.  |  🚚 {best_an['delivery']}\n"
-                    analog_text += f"〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n"
-                    added_analogs += 1
-                
-                if analog_text:
-                    answer += f"💡 <b>АНАЛОГИ И ЗАМЕНЫ:</b>\n{analog_text}"
+                    answer += f"<b>{tier_names[tier_id]}</b>\n"
+                    count = 0
+                    for item in tier_items:
+                        if count >= 4: break # Ограничим по 4 штуки на категорию, чтобы не спамить
+                        profit_star = "⭐ " if item.get("is_own") == 0 else "▫️ "
+                        answer += f"{profit_star}<b>{item['brand']}</b> (<code>{item['article']}</code>)\n"
+                        answer += f"  <i>{item['name']}</i>\n"
+                        answer += f"  💰 <b>{item['price']} ₽</b>  |  📦 {item['stock']} шт.  |  🚚 {item['delivery']}\n"
+                        answer += f"  〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n"
+                        count += 1
+                        has_offers = True
+                    answer += "\n"
                     
                 if not has_offers:
                     return f"⚠️ Деталь найдена, но сейчас нет предложений в наличии."
@@ -294,7 +329,6 @@ async def process_article(message: Message, state: FSMContext):
     result_text = await search_part_api(article)
     await wait_msg.delete() 
     
-    # Кнопка возврата в меню после вывода результатов
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
     ])
