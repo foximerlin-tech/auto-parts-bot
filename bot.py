@@ -18,17 +18,18 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 user_carts = {}    
-last_search = {}   # Словарь для хранения найденных предложений по пользователям
+last_search = {}   
 
 class UserState(StatesGroup):
     waiting_for_vin = State()          
     waiting_for_article = State()      
+    waiting_for_photo = State()        # Состояние ожидания фото для подбора
     waiting_for_support_message = State() 
 
 class AdminState(StatesGroup):
     waiting_for_reply = State()
 
-# --- ВЕБ-СЕРВЕР-ЗАГЛУШКА ДЛЯ RENDER (ОТКРЫТИЕ ПОРТА) ---
+# --- ВЕБ-СЕРВЕР-ЗАГЛУШКА ДЛЯ RENDER ---
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -42,26 +43,22 @@ async def start_web_server():
     await site.start()
     print(f"🌐 Веб-сервер запущен на порту {port}")
 
-# --- КЛАССИФИКАТОР БРЕНДОВ ПО КАЧЕСТВУ ---
+# --- КЛАССИФИКАТОР БРЕНДОВ ---
 PREMIUM_BRANDS = {
     "BOSCH", "BREMBO", "SACHS", "KAYABA", "KYB", "MAHLE", "DENSO", "NGK", 
     "SKF", "SNR", "TIMKEN", "ZIMMERMANN", "TEXTAR", "FAG", "LUK", "VALEO", 
-    "HENGST", "MANNE", "MANN", "MANN-FILTER", "BILSTEIN", "MONROE", "CONTITECH", "GATES"
+    "HENGST", "MANN", "MANN-FILTER", "BILSTEIN", "MONROE", "CONTITECH", "GATES"
 }
-
 MEDIUM_BRANDS = {
     "FEBI", "LEMFORDER", "TRW", "CTR", "MEYLE", "INA", "DAYCO", "SIDEM", 
-    "NISSENS", "BEHR", "HELLA", "CORTECO", "VALEO", "SWAG", "VDO", "HERTH+BUSS"
+    "NISSENS", "BEHR", "HELLA", "CORTECO", "SWAG", "VDO", "HERTH+BUSS"
 }
 
 def get_brand_tier(brand_name: str) -> int:
     b_upper = brand_name.strip().upper()
-    if b_upper in PREMIUM_BRANDS:
-        return 1
-    elif b_upper in MEDIUM_BRANDS:
-        return 2
-    else:
-        return 3
+    if b_upper in PREMIUM_BRANDS: return 1
+    elif b_upper in MEDIUM_BRANDS: return 2
+    else: return 3
 
 # --- ПОИСК АВТО ПО VIN ---
 async def decode_vin_vpic(vin: str) -> str:
@@ -105,12 +102,7 @@ async def search_part_api(requested_article: str):
                 if not target_brand:
                     return f"⚠️ Не удалось определить бренд для <code>{requested_article}</code>.", []
 
-            crosses_params = {
-                "secret": API_SECRET,
-                "article": requested_article,
-                "brand": target_brand,
-                "replaces": 1 
-            }
+            crosses_params = {"secret": API_SECRET, "article": requested_article, "brand": target_brand, "replaces": 1}
             
             async with session.get(url_crosses, params=crosses_params, ssl=False) as resp2:
                 if resp2.status != 200: return f"❌ Ошибка поиска аналогов.", []
@@ -128,8 +120,7 @@ async def search_part_api(requested_article: str):
                     
                     valid_prods = []
                     for p in products:
-                        if not isinstance(p, dict): continue
-                        if not p.get("price"): continue
+                        if not isinstance(p, dict) or not p.get("price"): continue
                         qty_str = str(p.get("quantity", "0")).strip().replace(">", "").replace("<", "")
                         if qty_str in ["0", "0.0", "", "Нет", "None"]: continue
                         valid_prods.append(p)
@@ -154,20 +145,15 @@ async def search_part_api(requested_article: str):
                     except: delivery_hours = 999
                     
                     raw_price = best_prod.get("price", 0)
-                    
                     try: 
                         base_price = float(raw_price)
-                        if base_price < 2000: markup = 30
-                        elif base_price < 4000: markup = 25
-                        else: markup = 15
+                        markup = 30 if base_price < 2000 else (25 if base_price < 4000 else 15)
                         final_price = int(base_price * (1 + (markup / 100)))
                         price = f"{final_price:,}".replace(",", " ")
                     except: 
                         price = str(raw_price)
                     
                     brand_name = item_data.get("brand", "Бренд")
-                    tier = get_brand_tier(brand_name)
-
                     return {
                         "article": item_data.get("article", "Неизвестно"),
                         "brand": brand_name,
@@ -175,15 +161,14 @@ async def search_part_api(requested_article: str):
                         "price": price,
                         "stock": best_prod.get("quantity", "0"),
                         "delivery": best_prod.get("show_date", "Не указан"),
-                        "tier": tier,
+                        "tier": get_brand_tier(brand_name),
                         "is_own": is_own,
                         "delivery_hours": delivery_hours,
                         "raw_price": float(raw_price) if raw_price else float('inf')
                     }
 
                 req_art_clean = re.sub(r'[^a-zA-Z0-9]', '', requested_article.lower())
-                exact_matches = []
-                analogs = []
+                exact_matches, analogs = [], []
 
                 for item in items:
                     if not isinstance(item, dict): continue
@@ -211,22 +196,13 @@ async def search_part_api(requested_article: str):
                     answer += f"  💰 <b>{best_exact['price']} ₽</b>  |  📦 {best_exact['stock']} шт.  |  🚚 {best_exact['delivery']}\n\n"
                     offers_data.append({k: v for k, v in best_exact.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                 
-                processed_analogs = []
-                for an in analogs:
-                    best_an = get_best_offer(an)
-                    if best_an: processed_analogs.append(best_an)
-                
+                processed_analogs = [get_best_offer(an) for an in analogs]
+                processed_analogs = [x for x in processed_analogs if x is not None]
                 processed_analogs.sort(key=lambda x: (x['tier'], x['is_own'], x['delivery_hours'], x['raw_price']))
                 
-                tier_names = {
-                    1: "🏆 ПРЕМИУМ БРЕНДЫ",
-                    2: "⚖️ СРЕДНИЙ СЕГМЕНТ",
-                    3: "💰 ЭКОНОМ / БЮДЖЕТ"
-                }
-                
+                tier_names = {1: "🏆 ПРЕМИУМ БРЕНДЫ", 2: "⚖️ СРЕДНИЙ СЕГМЕНТ", 3: "💰 ЭКОНОМ / БЮДЖЕТ"}
                 grouped = {1: [], 2: [], 3: []}
-                for an in processed_analogs:
-                    grouped[an['tier']].append(an)
+                for an in processed_analogs: grouped[an['tier']].append(an)
                 
                 for tier_id in [1, 2, 3]:
                     tier_items = grouped[tier_id]
@@ -259,6 +235,7 @@ async def search_part_api(requested_article: str):
 main_menu = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔍 Подбор по VIN (Помощь менеджера)", callback_data="vin")],
     [InlineKeyboardButton(text="🛠 Поиск цены по артикулу", callback_data="catalog")],
+    [InlineKeyboardButton(text="📸 Подобрать по фото / шильдику", callback_data="photo_search")],
     [InlineKeyboardButton(text="🛒 Моя корзина", callback_data="view_cart")],
     [InlineKeyboardButton(text="📞 Связь с менеджером", callback_data="support")]
 ])
@@ -280,10 +257,8 @@ async def start_handler(update, state: FSMContext):
         try: await update.answer_photo(photo=logo_url, caption=welcome_text, reply_markup=main_menu, parse_mode="HTML")
         except: await update.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
     else:
-        try:
-            await update.message.edit_text(welcome_text, reply_markup=main_menu, parse_mode="HTML")
-        except:
-            await update.message.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
+        try: await update.message.edit_text(welcome_text, reply_markup=main_menu, parse_mode="HTML")
+        except: await update.message.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
         await update.answer()
 
 @dp.message(Command("cancel"))
@@ -296,7 +271,7 @@ async def cancel_handler(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "vin")
 async def vin_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_vin)
-    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля (или нажмите /cancel для выхода):")
+    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля:")
     await callback.answer()
 
 @dp.message(UserState.waiting_for_vin)
@@ -316,11 +291,46 @@ async def process_vin(message: Message, state: FSMContext):
     else:
         await state.update_data(vin_info=result_text)
         await state.set_state(UserState.waiting_for_support_message)
-        
-        ask_parts_text = f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>"
-        await message.answer(ask_parts_text, parse_mode="HTML")
+        await message.answer(f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>", parse_mode="HTML")
 
-# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ И КНОПКА ДОБАВЛЕНИЯ ---
+# --- ВОРОНКА 3: ПОИСК ПО ФОТО / ШИЛЬДИКУ ---
+@dp.callback_query(F.data == "photo_search")
+async def photo_search_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_photo)
+    await callback.message.answer(
+        "📸 <b>Отправьте фотографию детали, старой запчасти или VIN-таблички.</b>\n\n"
+        "Менеджер изучит фото и подберет нужные варианты в ручном режиме (или нажмите /cancel для отмены):",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.message(UserState.waiting_for_photo, F.photo)
+async def process_photo_search(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    
+    admin_text = (
+        f"📸 <b>ЗАПРОС ПОДБОРА ПО ФОТО!</b>\n"
+        f"👤 От: {username}\n"
+        f"🆔 ID: <code>{user_id}</code>"
+    )
+    if message.caption:
+        admin_text += f"\n\n💬 Подпись: {message.caption}"
+        
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]])
+    
+    try:
+        await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, parse_mode="HTML", reply_markup=reply_markup)
+        await message.answer("✅ Фотография успешно отправлена специалисту! Мы подберем деталь и свяжемся с вами в ближайшее время.", reply_markup=main_menu)
+    except:
+        await message.answer("❌ Ошибка при отправке фото.", reply_markup=main_menu)
+    await state.clear()
+
+@dp.message(UserState.waiting_for_photo)
+async def wrong_photo_format(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте именно **фотографию** (изображение) или нажмите /cancel для отмены.")
+
+# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ С КНОПКАМИ БРЕНД/ЦЕНА СРАЗУ ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -337,48 +347,24 @@ async def process_article(message: Message, state: FSMContext):
     
     if offers:
         last_search[message.from_user.id] = offers
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Добавить товар из списка", callback_data="choose_from_list")],
-            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
-        ])
-        await message.answer(result_text, parse_mode="HTML", reply_markup=markup)
+        keyboard = []
+        for i, offer in enumerate(offers):
+            btn_text = f"🛒 {offer['brand']} — {offer['price']} ₽"
+            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}")])
+            
+        keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
+        markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await message.answer(
+            f"{result_text}\n\n👇 <b>Нажмите на нужный товар ниже, чтобы добавить его в корзину:</b>", 
+            parse_mode="HTML", 
+            reply_markup=markup
+        )
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
         await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
 
-# Шаг 1: Показываем список кнопок с брендом и ценой
-@dp.callback_query(F.data == "choose_from_list")
-async def choose_from_list_handler(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    offers = last_search.get(user_id, [])
-    
-    if not offers:
-        await callback.answer("❌ Результаты поиска устарели. Сделайте поиск заново.", show_alert=True)
-        return
-        
-    keyboard = []
-    for i, offer in enumerate(offers):
-        btn_text = f"🛒 {offer['brand']} — {offer['price']} ₽"
-        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}")])
-        
-    keyboard.append([InlineKeyboardButton(text="◀️ Назад к результатам", callback_data="catalog")])
-    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    
-    try:
-        await callback.message.edit_text(
-            "👇 <b>Выберите нужный товар из списка ниже, чтобы добавить его в корзину:</b>", 
-            parse_mode="HTML", 
-            reply_markup=markup
-        )
-    except:
-        await callback.message.answer(
-            "👇 <b>Выберите нужный товар из списка ниже, чтобы добавить его в корзину:</b>", 
-            parse_mode="HTML", 
-            reply_markup=markup
-        )
-    await callback.answer()
-
-# Шаг 2: Фактическое добавление выбранного товара
+# Добавление товара в корзину по нажатию на кнопку Бренд — Цена
 @dp.callback_query(F.data.startswith("add_cart_"))
 async def add_to_cart_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -391,7 +377,7 @@ async def add_to_cart_handler(callback: CallbackQuery):
         user_carts[user_id].append(offer)
         await callback.answer(f"✅ {offer['brand']} ({offer['price']} ₽) успешно добавлен в корзину!", show_alert=True)
     else:
-        await callback.answer("❌ Ошибка. Товар не найден.", show_alert=True)
+        await callback.answer("❌ Ошибка. Товар устарел, сделайте поиск заново.", show_alert=True)
 
 # --- ПРОСМОТР КОРЗИНЫ ---
 @dp.callback_query(F.data == "view_cart")
@@ -423,10 +409,8 @@ async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu")]
     ])
     
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=cart_menu)
-    except:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
+    try: await callback.message.edit_text(text, parse_mode="HTML", reply_markup=cart_menu)
+    except: await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
     await callback.answer()
 
 @dp.callback_query(F.data == "clear_cart")
@@ -469,15 +453,15 @@ async def checkout_handler(callback: CallbackQuery):
             f"Банк: <b>Т-Банк</b> (или Сбербанк)\n"
             f"Телефон: <code>+7 (999) 123-45-67</code>\n"
             f"Получатель: Иван И.\n\n"
-            f"👉 <i>Сразу после перевода, пожалуйста, пришлите сюда скриншот или квитанцию об оплате. Мы проверим поступление и сразу отправим заказ в работу!</i>"
+            f"👉 <i>Сразу после перевода пришлите сюда скриншот или квитанцию об оплате. Мы проверим поступление и сразу отправим заказ в работу!</i>"
         )
         await callback.message.answer(req_text, parse_mode="HTML", reply_markup=main_menu)
         
     except Exception as e:
-        await callback.message.answer("❌ Произошла ошибка при оформлении заказа. Попробуйте еще раз.", reply_markup=main_menu)
+        await callback.message.answer("❌ Произошла ошибка при оформлении заказа.", reply_markup=main_menu)
     await callback.answer()
 
-# --- ДВУСТОРОННЯЯ СВЯЗЬ И ПРИЕМ СКРИНШОТОВ ---
+# --- СВЯЗЬ С МЕНЕДЖЕРОМ И СКРИНШОТЫ ---
 @dp.callback_query(F.data == "support")
 async def support_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_support_message)
@@ -493,10 +477,9 @@ async def process_support_message(message: Message, state: FSMContext):
     data = await state.get_data()
     vin_info = data.get("vin_info", "")
     
-    admin_text = f"📩 <b>Новое обращение / Подбор!</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>\n\n"
-    if vin_info:
-        admin_text += f"🚙 <b>Данные авто:</b>\n{vin_info}\n\n"
-    admin_text += f"💬 <b>Сообщение/Список:</b>\n{user_text}"
+    admin_text = f"📩 <b>Новое обращение!</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>\n\n"
+    if vin_info: admin_text += f"🚙 <b>Данные авто:</b>\n{vin_info}\n\n"
+    admin_text += f"💬 <b>Сообщение:</b>\n{user_text}"
     
     reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Ответить клиенту", callback_data=f"reply_{user_id}")]])
     
@@ -505,7 +488,6 @@ async def process_support_message(message: Message, state: FSMContext):
             await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, parse_mode="HTML", reply_markup=reply_markup)
         else:
             await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=reply_markup)
-            
         await message.answer("✅ Ваше сообщение успешно отправлено менеджеру!", reply_markup=main_menu)
     except:
         await message.answer("❌ Ошибка при отправке.", reply_markup=main_menu)
@@ -515,35 +497,29 @@ async def process_support_message(message: Message, state: FSMContext):
 async def process_photo_message(message: Message):
     user_id = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
-    
-    admin_text = f"💳 <b>Возможно, это скриншот оплаты!</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>"
-    if message.caption:
-        admin_text += f"\n\n💬 Подпись: {message.caption}"
+    admin_text = f"💳 <b>Скриншот оплаты от пользователя:</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>"
+    if message.caption: admin_text += f"\n\n💬 Подпись: {message.caption}"
         
     reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]])
-    
     try:
         await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, parse_mode="HTML", reply_markup=reply_markup)
         await message.answer("✅ Фотография отправлена менеджеру на проверку.")
-    except:
-        pass
+    except: pass
 
 @dp.callback_query(F.data.startswith("reply_"), F.from_user.id == ADMIN_ID)
 async def admin_reply_callback(callback: CallbackQuery, state: FSMContext):
     client_id = int(callback.data.split("_")[1])
     await state.update_data(client_id=client_id)
     await state.set_state(AdminState.waiting_for_reply)
-    await callback.message.answer("✍️ <b>Режим ответа.</b>\nНапишите текст ответа клиенту (или <i>Отмена</i>).", parse_mode="HTML")
+    await callback.message.answer("✍️ <b>Режим ответа.</b> Напишите текст ответа клиенту:", parse_mode="HTML")
     await callback.answer()
 
 @dp.message(AdminState.waiting_for_reply, F.from_user.id == ADMIN_ID)
 async def send_reply_to_client(message: Message, state: FSMContext):
     data = await state.get_data()
     client_id = data.get("client_id")
-    reply_text = f"👨‍💼 <b>Менеджер:</b>\n\n{message.text}"
-    
     try:
-        await bot.send_message(chat_id=client_id, text=reply_text, parse_mode="HTML")
+        await bot.send_message(chat_id=client_id, text=f"👨‍💼 <b>Менеджер:</b>\n\n{message.text}", parse_mode="HTML")
         await message.answer("✅ Ответ отправлен!")
     except:
         await message.answer("❌ Ошибка: клиент заблокировал бота.")
@@ -551,14 +527,12 @@ async def send_reply_to_client(message: Message, state: FSMContext):
 
 async def main():
     await start_web_server()
-    
     commands = [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="cancel", description="Отменить ввод")
     ]
     await bot.set_my_commands(commands)
-    
-    print("Бот успешно запущен! Нажмите Ctrl+C для остановки.")
+    print("Бот успешно запущен!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
