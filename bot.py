@@ -265,7 +265,7 @@ main_menu = InlineKeyboardMarkup(inline_keyboard=[
 
 # ---------------- ОБРАБОТЧИКИ МЕНЮ ----------------
 @dp.message(CommandStart())
-@dp.callback_query(F.data == "back_to_menu")
+@dp.callback_query(F.data.in_({"back_to_menu", "catalog_back"}))
 async def start_handler(update, state: FSMContext):
     await state.clear()
     welcome_text = (
@@ -280,7 +280,10 @@ async def start_handler(update, state: FSMContext):
         try: await update.answer_photo(photo=logo_url, caption=welcome_text, reply_markup=main_menu, parse_mode="HTML")
         except: await update.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
     else:
-        await update.message.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
+        try:
+            await update.message.edit_text(welcome_text, reply_markup=main_menu, parse_mode="HTML")
+        except:
+            await update.message.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
         await update.answer()
 
 @dp.message(Command("cancel"))
@@ -334,7 +337,6 @@ async def process_article(message: Message, state: FSMContext):
     
     if offers:
         last_search[message.from_user.id] = offers
-        # Одна аккуратная кнопка внизу результатов
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Добавить товар из списка", callback_data="choose_from_list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
@@ -344,7 +346,7 @@ async def process_article(message: Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
         await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
 
-# Шаг 1: Пользователь нажал "Добавить товар из списка" — показываем выбор по номерам
+# Шаг 1: Показываем список кнопок с брендом и ценой
 @dp.callback_query(F.data == "choose_from_list")
 async def choose_from_list_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -355,23 +357,25 @@ async def choose_from_list_handler(callback: CallbackQuery):
         return
         
     keyboard = []
-    row = []
-    for i, offer in enumerate(offers, 1):
-        row.append(InlineKeyboardButton(text=f"{i}", callback_data=f"add_cart_{i-1}"))
-        if len(row) == 5:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+    for i, offer in enumerate(offers):
+        btn_text = f"🛒 {offer['brand']} — {offer['price']} ₽"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}")])
         
-    keyboard.append([InlineKeyboardButton(text="◀️ Назад к списку", callback_data="catalog_back")])
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад к результатам", callback_data="catalog")])
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
-    await callback.message.edit_text(
-        "🔢 <b>Выберите номер товара из списка выше для добавления в корзину:</b>", 
-        parse_mode="HTML", 
-        reply_markup=markup
-    )
+    try:
+        await callback.message.edit_text(
+            "👇 <b>Выберите нужный товар из списка ниже, чтобы добавить его в корзину:</b>", 
+            parse_mode="HTML", 
+            reply_markup=markup
+        )
+    except:
+        await callback.message.answer(
+            "👇 <b>Выберите нужный товар из списка ниже, чтобы добавить его в корзину:</b>", 
+            parse_mode="HTML", 
+            reply_markup=markup
+        )
     await callback.answer()
 
 # Шаг 2: Фактическое добавление выбранного товара
@@ -419,7 +423,10 @@ async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu")]
     ])
     
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=cart_menu)
+    except:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
     await callback.answer()
 
 @dp.callback_query(F.data == "clear_cart")
