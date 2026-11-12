@@ -2,7 +2,6 @@ import asyncio
 import aiohttp
 import re
 import os
-import easyocr
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -18,18 +17,12 @@ ADMIN_ID = 5212263401  # Ваш Telegram ID для связи и уведомл�
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Инициализируем OCR-модель для распознавания текста (английский + русский)
-print("⏳ Загрузка OCR-модели для распознавания текста...")
-reader = easyocr.Reader(['en', 'ru'])
-print("✅ OCR-модель успешно загружена!")
-
 user_carts = {}    
 last_search = {}   
 
 class UserState(StatesGroup):
     waiting_for_vin = State()          
     waiting_for_article = State()      
-    waiting_for_photo = State()        
     waiting_for_support_message = State() 
     # Состояния для пошагового подбора по автомобилю
     choosing_make = State()
@@ -280,7 +273,6 @@ main_menu = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔍 Подбор по VIN", callback_data="vin")],
     [InlineKeyboardButton(text="🛠 Поиск цены по артикулу", callback_data="catalog")],
     [InlineKeyboardButton(text="🚗 Подбор по автомобилю", callback_data="car_catalog_start")],
-    [InlineKeyboardButton(text="📸 Распознать деталь по фото", callback_data="photo_search")],
     [InlineKeyboardButton(text="🛒 Моя корзина", callback_data="view_cart")],
     [InlineKeyboardButton(text="📞 Связь с менеджером", callback_data="support")]
 ])
@@ -438,79 +430,6 @@ async def process_modification_choice(callback: CallbackQuery, state: FSMContext
         reply_markup=kb
     )
     await callback.answer()
-
-# --- АВТОМАТИЧЕСКОЕ РАСПОЗНАВАНИЕ ТЕКСТА ПО ФОТО (OCR) ---
-@dp.callback_query(F.data == "photo_search")
-async def photo_search_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.waiting_for_photo)
-    await callback.message.answer(
-        "📸 <b>Отправьте фото шильдика, упаковки или детали.</b>\n\n"
-        "Бот автоматически распознает артикул и найдет запчасть:",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@dp.message(UserState.waiting_for_photo, F.photo)
-async def process_photo_ocr(message: Message, state: FSMContext):
-    wait_msg = await message.answer("🔍 Анализирую фотографию...")
-    
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
-    photo_path = f"temp_{message.from_user.id}.jpg"
-    await bot.download_file(file_info.file_path, destination=photo_path)
-    
-    try:
-        result = reader.readtext(photo_path, detail=0)
-        os.remove(photo_path)
-        
-        recognized_text = " ".join(result).strip()
-        
-        if not recognized_text:
-            await wait_msg.delete()
-            await message.answer("⚠️ Не удалось распознать текст на фото. Введите артикул вручную.")
-            await state.clear()
-            return
-            
-        possible_article = recognized_text.split()[0]
-        await wait_msg.edit_text(f"📝 Артикул с фото: <code>{possible_article}</code>\n⏳ Ищу в базе...", parse_mode="HTML")
-        
-        result_text, offers = await search_part_api(possible_article)
-        await wait_msg.delete()
-        
-        if offers:
-            last_search[message.from_user.id] = offers
-            keyboard = []
-            row = []
-            for i, offer in enumerate(offers):
-                btn_text = f"{offer['brand']} ({offer['article']}) — {offer['price']} ₽"
-                row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row: keyboard.append(row)
-            
-            keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
-            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-            
-            await message.answer(
-                f"🎯 <b>Результат авто-подбора:</b>\n\n{result_text}\n\n👇 <b>Выберите товар ниже для добавления в корзину:</b>", 
-                parse_mode="HTML", 
-                reply_markup=markup
-            )
-        else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
-            await message.answer(f"⚠️ По коду <code>{possible_article}</code> ничего не найдено.", parse_mode="HTML", reply_markup=kb)
-            
-    except Exception as e:
-        if os.path.exists(photo_path): os.remove(photo_path)
-        await wait_msg.delete()
-        await message.answer(f"❌ Ошибка обработки фото.", reply_markup=main_menu)
-        
-    await state.clear()
-
-@dp.message(UserState.waiting_for_photo)
-async def wrong_photo_format(message: Message):
-    await message.answer("⚠️ Пожалуйста, отправьте фотографию.")
 
 # --- ПОИСК ПО АРТИКУЛУ С КНОПКАМИ СЕТКОЙ (Бренд - Артикул - Цена) ---
 @dp.callback_query(F.data == "catalog")
