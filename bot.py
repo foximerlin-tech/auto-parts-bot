@@ -23,7 +23,7 @@ last_search = {}
 class UserState(StatesGroup):
     waiting_for_vin = State()          
     waiting_for_article = State()      
-    waiting_for_photo = State()        # Состояние ожидания фото для подбора
+    waiting_for_photo = State()        
     waiting_for_support_message = State() 
 
 class AdminState(StatesGroup):
@@ -293,13 +293,13 @@ async def process_vin(message: Message, state: FSMContext):
         await state.set_state(UserState.waiting_for_support_message)
         await message.answer(f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>", parse_mode="HTML")
 
-# --- ВОРОНКА 3: ПОИСК ПО ФОТО / ШИЛЬДИКУ ---
+# --- ВОРОНКА 3: ПОИСК ПО ФОТО ---
 @dp.callback_query(F.data == "photo_search")
 async def photo_search_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_photo)
     await callback.message.answer(
         "📸 <b>Отправьте фотографию детали, старой запчасти или VIN-таблички.</b>\n\n"
-        "Менеджер изучит фото и подберет нужные варианты в ручном режиме (или нажмите /cancel для отмены):",
+        "Менеджер изучит фото и подберет нужные варианты в ручном режиме:",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -309,13 +309,8 @@ async def process_photo_search(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     
-    admin_text = (
-        f"📸 <b>ЗАПРОС ПОДБОРА ПО ФОТО!</b>\n"
-        f"👤 От: {username}\n"
-        f"🆔 ID: <code>{user_id}</code>"
-    )
-    if message.caption:
-        admin_text += f"\n\n💬 Подпись: {message.caption}"
+    admin_text = f"📸 <b>ЗАПРОС ПОДБОРА ПО ФОТО!</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>"
+    if message.caption: admin_text += f"\n\n💬 Подпись: {message.caption}"
         
     reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]])
     
@@ -330,7 +325,7 @@ async def process_photo_search(message: Message, state: FSMContext):
 async def wrong_photo_format(message: Message):
     await message.answer("⚠️ Пожалуйста, отправьте именно **фотографию** (изображение) или нажмите /cancel для отмены.")
 
-# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ С КНОПКАМИ БРЕНД/ЦЕНА СРАЗУ ---
+# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ С КНОПКАМИ СЕТКОЙ (2 В РЯД) ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -347,16 +342,24 @@ async def process_article(message: Message, state: FSMContext):
     
     if offers:
         last_search[message.from_user.id] = offers
+        
+        # Строим кнопки сеткой: по 2 штуки в ряду с брендом и ценой
         keyboard = []
+        row = []
         for i, offer in enumerate(offers):
-            btn_text = f"🛒 {offer['brand']} — {offer['price']} ₽"
-            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}")])
+            btn_text = f"{offer['brand']} ({offer['price']} ₽)"
+            row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
             
         keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
         await message.answer(
-            f"{result_text}\n\n👇 <b>Нажмите на нужный товар ниже, чтобы добавить его в корзину:</b>", 
+            f"{result_text}\n\n👇 <b>Выберите товар ниже, чтобы добавить его в корзину:</b>", 
             parse_mode="HTML", 
             reply_markup=markup
         )
@@ -364,7 +367,7 @@ async def process_article(message: Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
         await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
 
-# Добавление товара в корзину по нажатию на кнопку Бренд — Цена
+# Добавление товара в корзину по нажатию на кнопку Бренд (Цена)
 @dp.callback_query(F.data.startswith("add_cart_"))
 async def add_to_cart_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -461,7 +464,7 @@ async def checkout_handler(callback: CallbackQuery):
         await callback.message.answer("❌ Произошла ошибка при оформлении заказа.", reply_markup=main_menu)
     await callback.answer()
 
-# --- СВЯЗЬ С МЕНЕДЖЕРОМ И СКРИНШОТЫ ---
+# --- СВЯЗЬ С МЕНЕДЖЕРОМ ---
 @dp.callback_query(F.data == "support")
 async def support_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_support_message)
