@@ -1,6 +1,8 @@
 import asyncio
 import aiohttp
 import re
+import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import CommandStart, Command
@@ -12,14 +14,11 @@ TOKEN = "9002525170:AAHPOCkeqNevwP4sz0T-XadVj3pJbSQoi0o"
 API_SECRET = "2GlZZcxsrvPs70lgc6zDw-p0PW1tfwiR"
 ADMIN_ID = 5212263401  # Ваш Telegram ID для связи и уведомлений
 
-# URL для выгрузки заказа на ваш сайт (если потребуется в будущем)
-WEBSITE_API_URL = "https://ваш-сайт.ру/api/create_bot_order"
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 user_carts = {}    
-last_search = {}   
+last_search = {}   # Словарь для хранения последних результатов поиска по пользователям
 
 class UserState(StatesGroup):
     waiting_for_vin = State()          
@@ -29,26 +28,19 @@ class UserState(StatesGroup):
 class AdminState(StatesGroup):
     waiting_for_reply = State()
 
-# --- ВЫГРУЗКА ЗАКАЗА НА САЙТ ---
-async def export_order_to_website(user_id, username, cart_items, total_sum):
-    payload = {
-        "user_id": user_id,
-        "username": username,
-        "total_sum": total_sum,
-        "items": cart_items
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(WEBSITE_API_URL, json=payload, ssl=False, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return True, data.get("order_id", "OK")
-                else:
-                    return False, f"Ошибка сервера сайта: {response.status}"
-        except Exception as e:
-            print(f"⚠️ Не удалось выгрузить заказ на сайт: {e}")
-            return False, str(e)
+# --- ВЕБ-СЕРВЕР-ЗАГЛУШКА ДЛЯ RENDER (ОТКРЫТИЕ ПОРТА) ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Веб-сервер запущен на порту {port}")
 
 # --- ПОИСК АВТО ПО VIN ---
 async def decode_vin_vpic(vin: str) -> str:
@@ -69,7 +61,7 @@ async def decode_vin_vpic(vin: str) -> str:
     if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
     return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
 
-# --- ПОИСК ЗАПЧАСТЕЙ С ДИФФЕРЕНЦИРОВАННОЙ НАЦЕНКОЙ ---
+# --- ПОИСК ЗАПЧАСТЕЙ С ВОЗВРАТОМ СТРУКТУРИРОВАННЫХ ДАННЫХ ---
 async def search_part_api(requested_article: str):
     url_products = "https://api.pr-lg.ru/search/products"
     url_crosses = "https://api.pr-lg.ru/search/crosses"
@@ -142,7 +134,6 @@ async def search_part_api(requested_article: str):
                     
                     raw_price = best_prod.get("price", 0)
                     
-                    # Дифференцированная наценка
                     try: 
                         base_price = float(raw_price)
                         if base_price < 2000: markup = 30
@@ -210,7 +201,6 @@ async def search_part_api(requested_article: str):
                     if added_analogs >= 7: break 
                     profit_star = "⭐ " if best_an.get("is_own") == 0 else "▫️ "
                     
-                    # Вывод с описанием для аналогов
                     analog_text += f"{profit_star}<b>{best_an['brand']}</b> (<code>{best_an['article']}</code>)\n"
                     analog_text += f"<i>{best_an['name']}</i>\n"
                     analog_text += f"💰 <b>{best_an['price']} ₽</b>  |  📦 {best_an['stock']} шт.  |  🚚 {best_an['delivery']}\n"
@@ -268,7 +258,7 @@ async def cancel_handler(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "vin")
 async def vin_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_vin)
-    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля и список необходимых запасных частей (или нажмите /cancel для выхода):")
+    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля (или нажмите /cancel для выхода):")
     await callback.answer()
 
 @dp.message(UserState.waiting_for_vin)
@@ -292,7 +282,7 @@ async def process_vin(message: Message, state: FSMContext):
         ask_parts_text = f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>"
         await message.answer(ask_parts_text, parse_mode="HTML")
 
-# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ И КОРЗИНА ---
+# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ И КНОПКИ ДОБАВЛЕНИЯ В КОРЗИНУ ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -310,16 +300,18 @@ async def process_article(message: Message, state: FSMContext):
     if offers:
         last_search[message.from_user.id] = offers
         keyboard = []
+        # Создаем кнопки добавления в корзину для каждого найденного варианта
         for i, offer in enumerate(offers):
-            btn_text = f"🛒 {offer['brand']} ({offer['price']} ₽)"
+            btn_text = f"🛒 Добавить: {offer['brand']} ({offer['price']} ₽)"
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}")])
         
         keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
-        await message.answer(f"{result_text}\n\n👇 <b>Выберите деталь для корзины или отправьте следующий артикул:</b>", parse_mode="HTML", reply_markup=markup)
+        await message.answer(f"{result_text}\n\n👇 <b>Выберите товар для добавления в корзину:</b>", parse_mode="HTML", reply_markup=markup)
     else:
-        await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
+        await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("add_cart_"))
 async def add_to_cart_handler(callback: CallbackQuery):
@@ -333,9 +325,9 @@ async def add_to_cart_handler(callback: CallbackQuery):
         user_carts[user_id].append(offer)
         await callback.answer(f"✅ {offer['brand']} добавлен в корзину!", show_alert=True)
     else:
-        await callback.answer("❌ Ошибка. Товар не найден.", show_alert=True)
+        await callback.answer("❌ Ошибка. Товар устарел или не найден.", show_alert=True)
 
-# --- ПРОСМОТР КОРЗИНЫ С ПОШТУЧНЫМ УДАЛЕНИЕМ ---
+# --- ПРОСМОТР КОРЗИНЫ ---
 @dp.callback_query(F.data == "view_cart")
 async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -349,7 +341,6 @@ async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
         
     text = "<b>🛒 ВАША КОРЗИНА:</b>\n\n"
     total_sum = 0
-    cart_keyboard = []
     
     for i, item in enumerate(cart, 1):
         text += f"{i}. <b>{item['brand']}</b> (<code>{item['article']}</code>)\n"
@@ -358,35 +349,16 @@ async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
         try: total_sum += int(str(item['price']).replace(" ", ""))
         except: pass
         
-        cart_keyboard.append([InlineKeyboardButton(text=f"❌ Убрать: {item['brand']} ({item['price']} ₽)", callback_data=f"del_item_{i-1}")])
-        
     text += f"<b>Итого к оплате: {total_sum:,} ₽</b>\n".replace(",", " ")
     
-    cart_keyboard.extend([
+    cart_menu = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Оформить и Оплатить", callback_data="checkout")],
         [InlineKeyboardButton(text="🗑 Очистить всю корзину", callback_data="clear_cart")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu")]
     ])
     
-    cart_menu = InlineKeyboardMarkup(inline_keyboard=cart_keyboard)
     await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
     await callback.answer()
-
-# --- ПОШТУЧНОЕ УДАЛЕНИЕ ИЗ КОРЗИНЫ ---
-@dp.callback_query(F.data.startswith("del_item_"))
-async def remove_single_item_handler(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    item_idx = int(callback.data.split("_")[2])
-    
-    cart = user_carts.get(user_id, [])
-    if 0 <= item_idx < len(cart):
-        removed_item = cart.pop(item_idx)
-        await callback.answer(f"🗑 {removed_item['brand']} удален из корзины.", show_alert=True)
-        
-        fake_state = FSMContext(storage=dp.storage, key=callback.message.chat.id)
-        await view_cart_handler(callback, fake_state)
-    else:
-        await callback.answer("❌ Товар уже удален или не найден.", show_alert=True)
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart_handler(callback: CallbackQuery):
@@ -425,9 +397,9 @@ async def checkout_handler(callback: CallbackQuery):
             f"🎉 <b>Ваш заказ успешно оформлен!</b>\n\n"
             f"💰 К оплате: <b>{total_sum:,} ₽</b>\n\n".replace(",", " ") +
             f"💳 <b>Реквизиты для перевода (СБП):</b>\n"
-            f"Банк: <b>СберБанк</b> (или ВТБ, ОЗОН-банк)\n"
-            f"Телефон: <code>+7 (978) 020-6663</code>\n"
-            f"Получатель: Дмитрий Викторович З.\n\n"
+            f"Банк: <b>Т-Банк</b> (или Сбербанк)\n"
+            f"Телефон: <code>+7 (999) 123-45-67</code>\n"
+            f"Получатель: Иван И.\n\n"
             f"👉 <i>Сразу после перевода, пожалуйста, пришлите сюда скриншот или квитанцию об оплате. Мы проверим поступление и сразу отправим заказ в работу!</i>"
         )
         await callback.message.answer(req_text, parse_mode="HTML", reply_markup=main_menu)
@@ -436,8 +408,7 @@ async def checkout_handler(callback: CallbackQuery):
         await callback.message.answer("❌ Произошла ошибка при оформлении заказа. Попробуйте еще раз.", reply_markup=main_menu)
     await callback.answer()
 
-
-# ---------------- ДВУСТОРОННЯЯ СВЯЗЬ И ПРИЕМ СКРИНШОТОВ ----------------
+# --- ДВУСТОРОННЯЯ СВЯЗЬ И ПРИЕМ СКРИНШОТОВ ---
 @dp.callback_query(F.data == "support")
 async def support_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_support_message)
@@ -510,6 +481,8 @@ async def send_reply_to_client(message: Message, state: FSMContext):
     await state.clear()
 
 async def main():
+    await start_web_server()
+    
     commands = [
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="cancel", description="Отменить ввод")
