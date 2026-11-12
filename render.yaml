@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: auto-parts-bot
+    runtime: docker
+    repo: https://github.com/foximerlin-tech/auto-parts-bot
+    branch: main
+    plan: free
