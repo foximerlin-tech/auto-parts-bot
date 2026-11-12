@@ -18,6 +18,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 user_carts = {}    
+last_search = {}   # Словарь для хранения найденных предложений по пользователям
 
 class UserState(StatesGroup):
     waiting_for_vin = State()          
@@ -54,14 +55,13 @@ MEDIUM_BRANDS = {
 }
 
 def get_brand_tier(brand_name: str) -> int:
-    """Возвращает категорию: 1 - Премиум, 2 - Средний, 3 - Эконом"""
     b_upper = brand_name.strip().upper()
     if b_upper in PREMIUM_BRANDS:
         return 1
     elif b_upper in MEDIUM_BRANDS:
         return 2
     else:
-        return 3  # Все остальные (бюджетные / малоизвестные)
+        return 3
 
 # --- ПОИСК АВТО ПО VIN ---
 async def decode_vin_vpic(vin: str) -> str:
@@ -82,26 +82,28 @@ async def decode_vin_vpic(vin: str) -> str:
     if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
     return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
 
-# --- ПОИСК ЗАПЧАСТЕЙ С РАСПРЕДЕЛЕНИЕМ ПО КАТЕГОРИЯМ КАЧЕСТВА ---
+# --- ПОИСК ЗАПЧАСТЕЙ ---
 async def search_part_api(requested_article: str):
     url_products = "https://api.pr-lg.ru/search/products"
     url_crosses = "https://api.pr-lg.ru/search/crosses"
     
+    offers_data = [] 
+    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url_products, params={"secret": API_SECRET, "article": requested_article}, ssl=False) as resp1:
-                if resp1.status != 200: return f"❌ Ошибка сервера (Код {resp1.status})."
+                if resp1.status != 200: return f"❌ Ошибка сервера (Код {resp1.status}).", []
                 
                 prod_data = await resp1.json()
                 items_list = prod_data.get("data", prod_data) if isinstance(prod_data, dict) else prod_data
                 if isinstance(items_list, dict): items_list = list(items_list.values())
                 
                 if not items_list or not isinstance(items_list, list):
-                    return f"⚠️ Деталь с артикулом <code>{requested_article}</code> не найдена."
+                    return f"⚠️ Деталь с артикулом <code>{requested_article}</code> не найдена.", []
                 
                 target_brand = items_list[0].get("brand")
                 if not target_brand:
-                    return f"⚠️ Не удалось определить бренд для <code>{requested_article}</code>."
+                    return f"⚠️ Не удалось определить бренд для <code>{requested_article}</code>.", []
 
             crosses_params = {
                 "secret": API_SECRET,
@@ -111,14 +113,14 @@ async def search_part_api(requested_article: str):
             }
             
             async with session.get(url_crosses, params=crosses_params, ssl=False) as resp2:
-                if resp2.status != 200: return f"❌ Ошибка поиска аналогов."
+                if resp2.status != 200: return f"❌ Ошибка поиска аналогов.", []
                 
                 crosses_data = await resp2.json()
                 items = crosses_data.get("data", crosses_data) if isinstance(crosses_data, dict) else crosses_data
                 if isinstance(items, dict): items = list(items.values())
                 
                 if not items or not isinstance(items, list):
-                    return f"⚠️ Для <b>{target_brand}</b> <code>{requested_article}</code> сейчас нет предложений."
+                    return f"⚠️ Для <b>{target_brand}</b> <code>{requested_article}</code> сейчас нет предложений.", []
 
                 def get_best_offer(item_data):
                     products = item_data.get("products", [])
@@ -205,16 +207,15 @@ async def search_part_api(requested_article: str):
                     profit_star = "⭐ " if best_exact.get("is_own") == 0 else "🔹 "
                     answer += f"🎯 <b>ТОЧНОЕ СОВПАДЕНИЕ:</b>\n"
                     answer += f"{profit_star}<b>{best_exact['brand']}</b> (<code>{best_exact['article']}</code>)\n"
-                    answer += f"<i>{best_exact['name']}</i>\n"
-                    answer += f"➖➖➖➖➖➖➖➖➖➖\n"
-                    answer += f"💰 Цена: <b>{best_exact['price']} ₽</b>  |  📦 {best_exact['stock']} шт.  |  🚚 {best_exact['delivery']}\n\n"
+                    answer += f"  <i>{best_exact['name']}</i>\n"
+                    answer += f"  💰 <b>{best_exact['price']} ₽</b>  |  📦 {best_exact['stock']} шт.  |  🚚 {best_exact['delivery']}\n\n"
+                    offers_data.append({k: v for k, v in best_exact.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                 
                 processed_analogs = []
                 for an in analogs:
                     best_an = get_best_offer(an)
                     if best_an: processed_analogs.append(best_an)
                 
-                # Сортируем: сначала по качеству (tier), потом по складу/цене
                 processed_analogs.sort(key=lambda x: (x['tier'], x['is_own'], x['delivery_hours'], x['raw_price']))
                 
                 tier_names = {
@@ -234,23 +235,25 @@ async def search_part_api(requested_article: str):
                     answer += f"<b>{tier_names[tier_id]}</b>\n"
                     count = 0
                     for item in tier_items:
-                        if count >= 4: break # Ограничим по 4 штуки на категорию, чтобы не спамить
+                        if count >= 4: break 
                         profit_star = "⭐ " if item.get("is_own") == 0 else "▫️ "
                         answer += f"{profit_star}<b>{item['brand']}</b> (<code>{item['article']}</code>)\n"
                         answer += f"  <i>{item['name']}</i>\n"
                         answer += f"  💰 <b>{item['price']} ₽</b>  |  📦 {item['stock']} шт.  |  🚚 {item['delivery']}\n"
                         answer += f"  〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n"
+                        
+                        offers_data.append({k: v for k, v in item.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                         count += 1
                         has_offers = True
                     answer += "\n"
                     
                 if not has_offers:
-                    return f"⚠️ Деталь найдена, но сейчас нет предложений в наличии."
+                    return f"⚠️ Деталь найдена, но сейчас нет предложений в наличии.", []
                     
-                return answer.strip()
+                return answer.strip(), offers_data
 
         except Exception as e:
-            return f"❌ Техническая ошибка при поиске: {e}"
+            return f"❌ Техническая ошибка при поиске: {e}", []
 
 # ---------------- КЛАВИАТУРА ----------------
 main_menu = InlineKeyboardMarkup(inline_keyboard=[
@@ -314,7 +317,7 @@ async def process_vin(message: Message, state: FSMContext):
         ask_parts_text = f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>"
         await message.answer(ask_parts_text, parse_mode="HTML")
 
-# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ ---
+# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ И КНОПКА ДОБАВЛЕНИЯ ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -326,14 +329,65 @@ async def process_article(message: Message, state: FSMContext):
     article = message.text.strip()
     wait_msg = await message.answer(f"⏳ Ищу деталь <code>{article}</code>...")
     
-    result_text = await search_part_api(article)
+    result_text, offers = await search_part_api(article)
     await wait_msg.delete() 
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
-    ])
+    if offers:
+        last_search[message.from_user.id] = offers
+        # Одна аккуратная кнопка внизу результатов
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Добавить товар из списка", callback_data="choose_from_list")],
+            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]
+        ])
+        await message.answer(result_text, parse_mode="HTML", reply_markup=markup)
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
+        await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
+
+# Шаг 1: Пользователь нажал "Добавить товар из списка" — показываем выбор по номерам
+@dp.callback_query(F.data == "choose_from_list")
+async def choose_from_list_handler(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    offers = last_search.get(user_id, [])
     
-    await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул для поиска или вернитесь в меню:", parse_mode="HTML", reply_markup=kb)
+    if not offers:
+        await callback.answer("❌ Результаты поиска устарели. Сделайте поиск заново.", show_alert=True)
+        return
+        
+    keyboard = []
+    row = []
+    for i, offer in enumerate(offers, 1):
+        row.append(InlineKeyboardButton(text=f"{i}", callback_data=f"add_cart_{i-1}"))
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+        
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад к списку", callback_data="catalog_back")])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        "🔢 <b>Выберите номер товара из списка выше для добавления в корзину:</b>", 
+        parse_mode="HTML", 
+        reply_markup=markup
+    )
+    await callback.answer()
+
+# Шаг 2: Фактическое добавление выбранного товара
+@dp.callback_query(F.data.startswith("add_cart_"))
+async def add_to_cart_handler(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    offer_idx = int(callback.data.split("_")[2])
+    
+    user_offers = last_search.get(user_id, [])
+    if offer_idx < len(user_offers):
+        offer = user_offers[offer_idx]
+        if user_id not in user_carts: user_carts[user_id] = []
+        user_carts[user_id].append(offer)
+        await callback.answer(f"✅ {offer['brand']} ({offer['price']} ₽) успешно добавлен в корзину!", show_alert=True)
+    else:
+        await callback.answer("❌ Ошибка. Товар не найден.", show_alert=True)
 
 # --- ПРОСМОТР КОРЗИНЫ ---
 @dp.callback_query(F.data == "view_cart")
