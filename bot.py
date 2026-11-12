@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import re
 import os
+import easyocr
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -17,6 +18,11 @@ ADMIN_ID = 5212263401  # Ваш Telegram ID для связи и уведомл�
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Инициализируем OCR-модель для распознавания текста (английский + русский)
+print("⏳ Загрузка OCR-модели для распознавания текста...")
+reader = easyocr.Reader(['en', 'ru'])
+print("✅ OCR-модель успешно загружена!")
+
 user_carts = {}    
 last_search = {}   
 
@@ -25,6 +31,10 @@ class UserState(StatesGroup):
     waiting_for_article = State()      
     waiting_for_photo = State()        
     waiting_for_support_message = State() 
+    # Состояния для пошагового подбора по автомобилю
+    choosing_make = State()
+    choosing_model = State()
+    choosing_modification = State()
 
 class AdminState(StatesGroup):
     waiting_for_reply = State()
@@ -78,6 +88,40 @@ async def decode_vin_vpic(vin: str) -> str:
             
     if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
     return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
+
+# --- API КАТАЛОГА АВТОМОБИЛЕЙ ---
+async def api_get_car_makes():
+    url = f"https://api.pr-lg.ru/catalog/makes?secret={API_SECRET}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, ssl=False) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", data)
+        except: pass
+        return []
+
+async def api_get_car_models(make_id: str):
+    url = f"https://api.pr-lg.ru/catalog/models?secret={API_SECRET}&make_id={make_id}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, ssl=False) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", data)
+        except: pass
+        return []
+
+async def api_get_car_modifications(model_id: str):
+    url = f"https://api.pr-lg.ru/catalog/vehicles?secret={API_SECRET}&model_id={model_id}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, ssl=False) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", data)
+        except: pass
+        return []
 
 # --- ПОИСК ЗАПЧАСТЕЙ ---
 async def search_part_api(requested_article: str):
@@ -233,9 +277,10 @@ async def search_part_api(requested_article: str):
 
 # ---------------- КЛАВИАТУРА ----------------
 main_menu = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔍 Подбор по VIN (Помощь менеджера)", callback_data="vin")],
+    [InlineKeyboardButton(text="🔍 Подбор по VIN", callback_data="vin")],
     [InlineKeyboardButton(text="🛠 Поиск цены по артикулу", callback_data="catalog")],
-    [InlineKeyboardButton(text="📸 Подобрать по фото / шильдику", callback_data="photo_search")],
+    [InlineKeyboardButton(text="🚗 Подбор по автомобилю", callback_data="car_catalog_start")],
+    [InlineKeyboardButton(text="📸 Распознать деталь по фото", callback_data="photo_search")],
     [InlineKeyboardButton(text="🛒 Моя корзина", callback_data="view_cart")],
     [InlineKeyboardButton(text="📞 Связь с менеджером", callback_data="support")]
 ])
@@ -293,39 +338,181 @@ async def process_vin(message: Message, state: FSMContext):
         await state.set_state(UserState.waiting_for_support_message)
         await message.answer(f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>", parse_mode="HTML")
 
-# --- ВОРОНКА 3: ПОИСК ПО ФОТО ---
+# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ ---
+@dp.callback_query(F.data == "car_catalog_start")
+async def start_car_catalog(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.choosing_make)
+    wait_msg = await callback.message.edit_text("⏳ Загружаю список марок автомобилей...")
+    
+    makes = await api_get_car_makes()
+    await wait_msg.delete()
+    
+    if not makes:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]])
+        await callback.message.answer("⚠️ Каталог марок временно недоступен. Используйте поиск по артикулу.", reply_markup=kb)
+        await callback.answer()
+        return
+
+    keyboard = []
+    row = []
+    for make in makes[:30]:
+        make_id = str(make.get("id", ""))
+        make_name = make.get("name", "Марка")
+        row.append(InlineKeyboardButton(text=make_name, callback_data=f"make_{make_id}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row: keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.answer("🚗 <b>Выберите марку вашего автомобиля:</b>", parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
+
+@dp.callback_query(UserState.choosing_make, F.data.startswith("make_"))
+async def process_make_choice(callback: CallbackQuery, state: FSMContext):
+    make_id = callback.data.split("_")[1]
+    await state.update_data(make_id=make_id)
+    
+    wait_msg = await callback.message.edit_text("⏳ Загружаю модели...")
+    models = await api_get_car_models(make_id)
+    await wait_msg.delete()
+    
+    if not models:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к маркам", callback_data="car_catalog_start")]])
+        await callback.message.answer("⚠️ Для этой марки модели не найдены.", reply_markup=kb)
+        return
+
+    keyboard = []
+    row = []
+    for model in models[:30]:
+        model_id = str(model.get("id", ""))
+        model_name = model.get("name", "Модель")
+        row.append(InlineKeyboardButton(text=model_name, callback_data=f"model_{model_id}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row: keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад к маркам", callback_data="car_catalog_start")])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.answer("🚙 <b>Выберите модель автомобиля:</b>", parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
+
+@dp.callback_query(UserState.choosing_model, F.data.startswith("model_"))
+async def process_model_choice(callback: CallbackQuery, state: FSMContext):
+    model_id = callback.data.split("_")[1]
+    await state.update_data(model_id=model_id)
+    
+    wait_msg = await callback.message.edit_text("⏳ Загружаю модификации и двигатели...")
+    modifications = await api_get_car_modifications(model_id)
+    await wait_msg.delete()
+    
+    if not modifications:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]])
+        await callback.message.answer("⚠️ Модификации для данной модели не найдены.", reply_markup=kb)
+        return
+
+    keyboard = []
+    for mod in modifications[:20]:
+        mod_id = str(mod.get("id", ""))
+        mod_name = f"{mod.get('name', '')} ({mod.get('power', '')} л.с.)"
+        keyboard.append([InlineKeyboardButton(text=mod_name, callback_data=f"mod_{mod_id}")])
+        
+    keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.answer("⚙️ <b>Выберите модификацию / двигатель:</b>", parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("mod_"))
+async def process_modification_choice(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_article)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
+    await callback.message.edit_text(
+        "✅ <b>Автомобиль успешно выбран!</b>\n\n"
+        "Теперь отправьте артикул нужной детали, и бот выдаст актуальные цены и аналоги:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+# --- АВТОМАТИЧЕСКОЕ РАСПОЗНАВАНИЕ ТЕКСТА ПО ФОТО (OCR) ---
 @dp.callback_query(F.data == "photo_search")
 async def photo_search_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_photo)
     await callback.message.answer(
-        "📸 <b>Отправьте фотографию детали, старой запчасти или VIN-таблички.</b>\n\n"
-        "Менеджер изучит фото и подберет нужные варианты в ручном режиме:",
+        "📸 <b>Отправьте фото шильдика, упаковки или детали.</b>\n\n"
+        "Бот автоматически распознает артикул и найдет запчасть:",
         parse_mode="HTML"
     )
     await callback.answer()
 
 @dp.message(UserState.waiting_for_photo, F.photo)
-async def process_photo_search(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+async def process_photo_ocr(message: Message, state: FSMContext):
+    wait_msg = await message.answer("🔍 Анализирую фотографию...")
     
-    admin_text = f"📸 <b>ЗАПРОС ПОДБОРА ПО ФОТО!</b>\n👤 От: {username}\n🆔 ID: <code>{user_id}</code>"
-    if message.caption: admin_text += f"\n\n💬 Подпись: {message.caption}"
-        
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]])
+    photo = message.photo[-1]
+    file_info = await bot.get_file(photo.file_id)
+    photo_path = f"temp_{message.from_user.id}.jpg"
+    await bot.download_file(file_info.file_path, destination=photo_path)
     
     try:
-        await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, parse_mode="HTML", reply_markup=reply_markup)
-        await message.answer("✅ Фотография успешно отправлена специалисту! Мы подберем деталь и свяжемся с вами в ближайшее время.", reply_markup=main_menu)
-    except:
-        await message.answer("❌ Ошибка при отправке фото.", reply_markup=main_menu)
+        result = reader.readtext(photo_path, detail=0)
+        os.remove(photo_path)
+        
+        recognized_text = " ".join(result).strip()
+        
+        if not recognized_text:
+            await wait_msg.delete()
+            await message.answer("⚠️ Не удалось распознать текст на фото. Введите артикул вручную.")
+            await state.clear()
+            return
+            
+        possible_article = recognized_text.split()[0]
+        await wait_msg.edit_text(f"📝 Артикул с фото: <code>{possible_article}</code>\n⏳ Ищу в базе...", parse_mode="HTML")
+        
+        result_text, offers = await search_part_api(possible_article)
+        await wait_msg.delete()
+        
+        if offers:
+            last_search[message.from_user.id] = offers
+            keyboard = []
+            row = []
+            for i, offer in enumerate(offers):
+                btn_text = f"{offer['brand']} ({offer['article']}) — {offer['price']} ₽"
+                row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row: keyboard.append(row)
+            
+            keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
+            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            
+            await message.answer(
+                f"🎯 <b>Результат авто-подбора:</b>\n\n{result_text}\n\n👇 <b>Выберите товар ниже для добавления в корзину:</b>", 
+                parse_mode="HTML", 
+                reply_markup=markup
+            )
+        else:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
+            await message.answer(f"⚠️ По коду <code>{possible_article}</code> ничего не найдено.", parse_mode="HTML", reply_markup=kb)
+            
+    except Exception as e:
+        if os.path.exists(photo_path): os.remove(photo_path)
+        await wait_msg.delete()
+        await message.answer(f"❌ Ошибка обработки фото.", reply_markup=main_menu)
+        
     await state.clear()
 
 @dp.message(UserState.waiting_for_photo)
 async def wrong_photo_format(message: Message):
-    await message.answer("⚠️ Пожалуйста, отправьте именно **фотографию** (изображение) или нажмите /cancel для отмены.")
+    await message.answer("⚠️ Пожалуйста, отправьте фотографию.")
 
-# --- ВОРОНКА 2: ПОИСК ПО АРТИКУЛУ С КНОПКАМИ СЕТКОЙ (2 В РЯД) ---
+# --- ПОИСК ПО АРТИКУЛУ С КНОПКАМИ СЕТКОЙ (Бренд - Артикул - Цена) ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -343,7 +530,6 @@ async def process_article(message: Message, state: FSMContext):
     if offers:
         last_search[message.from_user.id] = offers
         
-        # Строим кнопки сеткой: по 2 штуки в ряду (Бренд - Артикул - Цена)
         keyboard = []
         row = []
         for i, offer in enumerate(offers):
@@ -367,7 +553,7 @@ async def process_article(message: Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
         await message.answer(f"{result_text}\n\n👇 Отправьте следующий артикул:", parse_mode="HTML", reply_markup=kb)
 
-# Добавление товара в корзину по нажатию на кнопку Бренд (Цена)
+# Добавление товара в корзину
 @dp.callback_query(F.data.startswith("add_cart_"))
 async def add_to_cart_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -456,12 +642,12 @@ async def checkout_handler(callback: CallbackQuery):
             f"Банк: <b>Т-Банк</b> (или Сбербанк)\n"
             f"Телефон: <code>+7 (999) 123-45-67</code>\n"
             f"Получатель: Иван И.\n\n"
-            f"👉 <i>Сразу после перевода пришлите сюда скриншот или квитанцию об оплате. Мы проверим поступление и сразу отправим заказ в работу!</i>"
+            f"👉 <i>После перевода пришлите сюда квитанцию или скриншот оплаты для подтверждения заказа!</i>"
         )
         await callback.message.answer(req_text, parse_mode="HTML", reply_markup=main_menu)
         
     except Exception as e:
-        await callback.message.answer("❌ Произошла ошибка при оформлении заказа.", reply_markup=main_menu)
+        await callback.message.answer("❌ Ошибка при оформлении заказа.", reply_markup=main_menu)
     await callback.answer()
 
 # --- СВЯЗЬ С МЕНЕДЖЕРОМ ---
