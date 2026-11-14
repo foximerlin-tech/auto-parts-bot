@@ -274,27 +274,11 @@ async def smart_router(message: Message, state: FSMContext):
         await message.answer(f"✅ Добавлено в корзину: <b>{matched_offer['brand']}</b> (<code>{matched_offer['article']}</code>) за <b>{matched_offer['price']} ₽</b>\n\nНапишите /cart для оформления заказа.", parse_mode="HTML")
         return
 
-    # 2. Проверяем, находится ли пользователь в режиме ожидания уточнения мотора после VIN
-    current_state = await state.get_state()
-    if current_state == UserState.waiting_for_engine_details.state:
-        await state.update_data(engine_info=text)
-        await message.answer(f"✅ Двигатель зафиксирован: <b>{text}</b>.\n\nТеперь отправьте артикул нужной детали:", parse_mode="HTML")
-        return
-
-    # 3. Проверяем, является ли сообщение 17-значным VIN-кодом
-    clean_text = text.upper()
-    if len(clean_text) == 17 and clean_text.isalnum():
-        wait_msg = await message.answer("⏳ Проверяем VIN-код...")
-        result_text = await decode_vin_vpic(clean_text)
-        await wait_msg.delete()
-        
-        await state.update_data(vin_info=result_text, vin_code=clean_text)
-        await state.set_state(UserState.waiting_for_engine_details)
-        await message.answer(result_text, parse_mode="HTML")
-        return
-
-    # 4. Проверяем, похоже ли сообщение на артикул (короткий буквенно-цифровой код без пробелов или с дефисами)
-    if len(text) <= 25 and re.match(r'^[a-zA-Z0-9\-\.]+$', text) and any(char.isdigit() for char in text):
+    # 2. Проверяем, похоже ли сообщение на артикул (или если пользователь написал запрос на подбор вместо мотора)
+    is_article = len(text) <= 25 and re.match(r'^[a-zA-Z0-9\-\.]+$', text) and any(char.isdigit() for char in text)
+    
+    if is_article:
+        await state.clear()
         data = await state.get_data()
         engine_info = data.get("engine_info", "")
         
@@ -304,6 +288,30 @@ async def smart_router(message: Message, state: FSMContext):
         
         if offers:
             last_search[user_id] = offers
+        await message.answer(result_text, parse_mode="HTML")
+        return
+
+    # 3. Проверяем, находится ли пользователь в режиме ожидания уточнения мотора после VIN
+    current_state = await state.get_state()
+    if current_state == UserState.waiting_for_engine_details.state:
+        if "подбор" in text.lower():
+            await message.answer("⚠️ Пожалуйста, укажите код или объем двигателя (например, <i>BZB</i> или <i>1.8 TSI</i>), либо отправьте артикул детали.", parse_mode="HTML")
+            return
+            
+        await state.update_data(engine_info=text)
+        await state.clear()
+        await message.answer(f"✅ Двигатель зафиксирован: <b>{text}</b>.\n\nТеперь отправьте артикул нужной детали для поиска:", parse_mode="HTML")
+        return
+
+    # 4. Проверяем, является ли сообщение 17-значным VIN-кодом
+    clean_text = text.upper()
+    if len(clean_text) == 17 and clean_text.isalnum():
+        wait_msg = await message.answer("⏳ Проверяем VIN-код...")
+        result_text = await decode_vin_vpic(clean_text)
+        await wait_msg.delete()
+        
+        await state.update_data(vin_info=result_text, vin_code=clean_text)
+        await state.set_state(UserState.waiting_for_engine_details)
         await message.answer(result_text, parse_mode="HTML")
         return
 
