@@ -50,11 +50,11 @@ async def start_web_server():
 PREMIUM_BRANDS = {
     "BOSCH", "BREMBO", "SACHS", "KAYABA", "KYB", "MAHLE", "DENSO", "NGK", 
     "SKF", "SNR", "TIMKEN", "ZIMMERMANN", "TEXTAR", "FAG", "LUK", "VALEO", 
-    "HENGST", "MANN", "MANN-FILTER", "BILSTEIN", "MONROE", "CONTITECH", "GATES"
+    "HENGST", "MANN", "MANN-FILTER", "BILSTEIN", "MONROE", "CONTITECH", "GATES", "UFI"
 }
 MEDIUM_BRANDS = {
     "FEBI", "LEMFORDER", "TRW", "CTR", "MEYLE", "INA", "DAYCO", "SIDEM", 
-    "NISSENS", "BEHR", "HELLA", "CORTECO", "SWAG", "VDO", "HERTH+BUSS"
+    "NISSENS", "BEHR", "HELLA", "CORTECO", "SWAG", "VDO", "HERTH+BUSS", "KS"
 }
 
 def get_brand_tier(brand_name: str) -> int:
@@ -63,7 +63,7 @@ def get_brand_tier(brand_name: str) -> int:
     elif b_upper in MEDIUM_BRANDS: return 2
     else: return 3
 
-# --- ПОИСК АВТО ПО VIN ---
+# --- ПОИСК АВТО ПО VIN (ЭКСПЕРТНЫЙ ФОРМАТ) ---
 async def decode_vin_vpic(vin: str) -> str:
     url = f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json"
     async with aiohttp.ClientSession() as session:
@@ -79,21 +79,36 @@ async def decode_vin_vpic(vin: str) -> str:
         elif item["Variable"] == "Model" and item["Value"]: model = item["Value"]
         elif item["Variable"] == "Model Year" and item["Value"]: year = item["Value"]
             
-    if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
-    return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
+    if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден в базовом реестре."
+    
+    # Формируем экспертный ответ в стиле технического разбора
+    report = (
+        f"🔍 <b>Разбор по вашему VIN <code>{vin}</code>:</b>\n\n"
+        f"<b>1. Автомобиль и параметры</b>\n"
+        f"• VIN валиден, производитель: <b>{make}</b>.\n"
+        f"• Год выпуска: <b>{year} г.в.</b>\n"
+        f"• Точная модификация и код двигателя по базовому декодеру требуют подтверждения.\n\n"
+        f"<b>2. Статус подбора</b>\n"
+        f"• Прямой OEM-каталог производителя не подключён к боту.\n"
+        f"• Для подбора точных артикулов и фильтрации аналогов нам понадобятся параметры двигателя.\n\n"
+        f"<b>3. Что нужно от вас для продолжения:</b>\n"
+        f"1. Подтвердите модель и точный объем/код двигателя (например, 1.4 MPI или 1.6).\n"
+        f"2. Тип КПП (механика / автомат).\n"
+        f"3. Список необходимых запчастей или артикул.\n\n"
+        f"👇 <i>Напишите эти данные ответным сообщением, и мы подберем лучшие варианты!</i>"
+    )
+    return report
 
-# --- API КАТАЛОГА АВТОМОБИЛЕЙ (С ЛОГИРОВАНИЕМ ДЛЯ ДИАГНОСТИКИ) ---
+# --- API КАТАЛОГА АВТОМОБИЛЕЙ ---
 async def api_get_car_makes():
     url = f"https://api.pr-lg.ru/catalog/makes?secret={API_SECRET}"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
-                print(f"🚗 Статус ответа API марок: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except Exception as e:
-            print(f"❌ Ошибка запроса марок: {e}")
+        except: pass
         return []
 
 async def api_get_car_models(make_id: str):
@@ -101,12 +116,10 @@ async def api_get_car_models(make_id: str):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
-                print(f"🚙 Статус ответа API моделей: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except Exception as e:
-            print(f"❌ Ошибка запроса моделей: {e}")
+        except: pass
         return []
 
 async def api_get_car_modifications(model_id: str):
@@ -114,15 +127,13 @@ async def api_get_car_modifications(model_id: str):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
-                print(f"⚙️ Статус ответа API модификаций: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except Exception as e:
-            print(f"❌ Ошибка запроса модификаций: {e}")
+        except: pass
         return []
 
-# --- ПОИСК ЗАПЧАСТЕЙ ---
+# --- ЭКСПЕРТНЫЙ ПОИСК ЗАПЧАСТЕЙ ПО АРТИКУЛУ ---
 async def search_part_api(requested_article: str):
     url_products = "https://api.pr-lg.ru/search/products"
     url_crosses = "https://api.pr-lg.ru/search/crosses"
@@ -139,9 +150,10 @@ async def search_part_api(requested_article: str):
                 if isinstance(items_list, dict): items_list = list(items_list.values())
                 
                 if not items_list or not isinstance(items_list, list):
-                    return f"⚠️ Деталь с артикулом <code>{requested_article}</code> не найдена.", []
+                    return f"⚠️ Деталь с артикулом <code>{requested_article}</code> не найдена в базе поставщиков.", []
                 
                 target_brand = items_list[0].get("brand")
+                target_desc = items_list[0].get("description", "Деталь")
                 if not target_brand:
                     return f"⚠️ Не удалось определить бренд для <code>{requested_article}</code>.", []
 
@@ -155,7 +167,7 @@ async def search_part_api(requested_article: str):
                 if isinstance(items, dict): items = list(items.values())
                 
                 if not items or not isinstance(items, list):
-                    return f"⚠️ Для <b>{target_brand}</b> <code>{requested_article}</code> сейчас нет предложений.", []
+                    items = items_list # Если кроссов нет, ищем хотя бы по исходному товару
 
                 def get_best_offer(item_data):
                     products = item_data.get("products", [])
@@ -182,8 +194,10 @@ async def search_part_api(requested_article: str):
                     valid_prods.sort(key=sort_logic)
                     best_prod = valid_prods[0] 
                     
-                    wh_name = str(best_prod.get("custom_warehouse_name", "")).lower()
+                    wh_name = str(best_prod.get("custom_warehouse_name", "Склад поставщика")).lower()
                     is_own = 0 if "профит" in wh_name or "profit" in wh_name else 1
+                    warehouse_title = best_prod.get("custom_warehouse_name", "Основной склад")
+                    
                     try: delivery_hours = int(best_prod.get("delivery_time", 999))
                     except: delivery_hours = 999
                     
@@ -203,7 +217,8 @@ async def search_part_api(requested_article: str):
                         "name": item_data.get("description", "Деталь"),
                         "price": price,
                         "stock": best_prod.get("quantity", "0"),
-                        "delivery": best_prod.get("show_date", "Не указан"),
+                        "delivery": best_prod.get("show_date", "Срок уточняется"),
+                        "warehouse": warehouse_title,
                         "tier": get_brand_tier(brand_name),
                         "is_own": is_own,
                         "delivery_hours": delivery_hours,
@@ -222,7 +237,9 @@ async def search_part_api(requested_article: str):
                     else:
                         analogs.append(item)
 
-                answer = f"🔍 Запрос: <b>{target_brand} <code>{requested_article}</code></b>\n\n"
+                # Формируем экспертный структурированный ответ
+                answer = f"📦 <b>Результат поиска по артикулу:</b> <code>{requested_article}</code>\n"
+                answer += f"<i>Наименование:</i> {target_desc}\n\n"
                 
                 best_exact = None
                 for em in exact_matches:
@@ -232,18 +249,19 @@ async def search_part_api(requested_article: str):
                 has_offers = False
                 if best_exact:
                     has_offers = True
-                    profit_star = "⭐ " if best_exact.get("is_own") == 0 else "🔹 "
-                    answer += f"🎯 <b>ТОЧНОЕ СОВПАДЕНИЕ:</b>\n"
-                    answer += f"{profit_star}<b>{best_exact['brand']}</b> (<code>{best_exact['article']}</code>)\n"
-                    answer += f"  <i>{best_exact['name']}</i>\n"
-                    answer += f"  💰 <b>{best_exact['price']} ₽</b>  |  📦 {best_exact['stock']} шт.  |  🚚 {best_exact['delivery']}\n\n"
+                    profit_star = "⭐ [Центральный склад] " if best_exact.get("is_own") == 0 else "🔹 "
+                    answer += f"<b>1. Исходный вариант / Точное совпадение:</b>\n"
+                    answer += f"{profit_star}<b>{best_exact['brand']}</b> <code>{best_exact['article']}</code>\n"
+                    answer += f"  • <i>{best_exact['name']}</i>\n"
+                    answer += f"  • Цена с учетом доставки: <b>{best_exact['price']} ₽</b>\n"
+                    answer += f"  • Остаток: {best_exact['stock']} шт. | Склад: {best_exact['warehouse']} ({best_exact['delivery']})\n\n"
                     offers_data.append({k: v for k, v in best_exact.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                 
                 processed_analogs = [get_best_offer(an) for an in analogs]
                 processed_analogs = [x for x in processed_analogs if x is not None]
                 processed_analogs.sort(key=lambda x: (x['tier'], x['is_own'], x['delivery_hours'], x['raw_price']))
                 
-                tier_names = {1: "🏆 ПРЕМИУМ БРЕНДЫ", 2: "⚖️ СРЕДНИЙ СЕГМЕНТ", 3: "💰 ЭКОНОМ / БЮДЖЕТ"}
+                tier_names = {1: "🏆 2. Премиум-аналоги и кандидаты", 2: "⚖️ 3. Средний сегмент", 3: "💰 4. Бюджетные аналоги (Эконом)"}
                 grouped = {1: [], 2: [], 3: []}
                 for an in processed_analogs: grouped[an['tier']].append(an)
                 
@@ -254,12 +272,12 @@ async def search_part_api(requested_article: str):
                     answer += f"<b>{tier_names[tier_id]}</b>\n"
                     count = 0
                     for item in tier_items:
-                        if count >= 4: break 
+                        if count >= 3: break # Ограничиваем выдачу топ-3 в каждой категории для читаемости
                         profit_star = "⭐ " if item.get("is_own") == 0 else "▫️ "
                         answer += f"{profit_star}<b>{item['brand']}</b> (<code>{item['article']}</code>)\n"
-                        answer += f"  <i>{item['name']}</i>\n"
-                        answer += f"  💰 <b>{item['price']} ₽</b>  |  📦 {item['stock']} шт.  |  🚚 {item['delivery']}\n"
-                        answer += f"  〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n"
+                        answer += f"  • <i>{item['name']}</i>\n"
+                        answer += f"  • Цена: <b>{item['price']} ₽</b> | Остаток: {item['stock']} шт. | 🚚 {item['delivery']}\n"
+                        answer += f"  ──────────────────────\n"
                         
                         offers_data.append({k: v for k, v in item.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                         count += 1
@@ -267,16 +285,17 @@ async def search_part_api(requested_article: str):
                     answer += "\n"
                     
                 if not has_offers:
-                    return f"⚠️ Деталь найдена, но сейчас нет предложений в наличии.", []
+                    return f"⚠️ Деталь найдена в каталоге, но в данный момент нет активных предложений по остаткам.", []
                     
+                answer += "💡 <i>Нажмите на кнопку ниже, чтобы добавить нужный вариант в корзину.</i>"
                 return answer.strip(), offers_data
 
         except Exception as e:
-            return f"❌ Техническая ошибка при поиске: {e}", []
+            return f"❌ Техническая ошибка при обработке запроса: {e}", []
 
 # ---------------- КЛАВИАТУРА ----------------
 main_menu = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔍 Подбор по VIN", callback_data="vin")],
+    [InlineKeyboardButton(text="🔍 Подбор по VIN (Экспертный разбор)", callback_data="vin")],
     [InlineKeyboardButton(text="🛠 Поиск цены по артикулу", callback_data="catalog")],
     [InlineKeyboardButton(text="🚗 Подбор по автомобилю", callback_data="car_catalog_start")],
     [InlineKeyboardButton(text="🛒 Моя корзина", callback_data="view_cart")],
@@ -289,10 +308,10 @@ main_menu = InlineKeyboardMarkup(inline_keyboard=[
 async def start_handler(update, state: FSMContext):
     await state.clear()
     welcome_text = (
-        "👋 <b>Добро пожаловать в магазин автозапчастей!</b>\n\n"
+        "👋 <b>Добро пожаловать в профессиональный подбор автозапчастей!</b>\n\n"
         "Выберите нужное действие в меню ниже:\n\n"
         "<i>(⭐ — товары с нашего центрального склада)</i>\n"
-        "<i>(💡 — нажмите на артикул, чтобы скопировать его)</i>"
+        "<i>(💡 — цены указаны с учетом доставки и наценки)</i>"
     )
     logo_url = "https://images.unsplash.com/photo-1530046339160-ce3e530c7d2f?q=80&w=800&auto=format&fit=crop"
     
@@ -314,7 +333,7 @@ async def cancel_handler(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "vin")
 async def vin_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_vin)
-    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля:")
+    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля для экспертного разбора:")
     await callback.answer()
 
 @dp.message(UserState.waiting_for_vin)
@@ -324,19 +343,15 @@ async def process_vin(message: Message, state: FSMContext):
         await message.answer("⚠️ VIN-код должен состоять ровно из 17 символов. Попробуйте еще раз.")
         return 
     
-    wait_msg = await message.answer("⏳ Проверяю VIN по базе...")
+    wait_msg = await message.answer("⏳ Проверяем VIN-код и формируем экспертный отчет...")
     result_text = await decode_vin_vpic(user_vin)
     await wait_msg.delete()
     
-    if "❌" in result_text:
-        await message.answer(result_text, reply_markup=main_menu)
-        await state.clear()
-    else:
-        await state.update_data(vin_info=result_text)
-        await state.set_state(UserState.waiting_for_support_message)
-        await message.answer(f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>", parse_mode="HTML")
+    await state.update_data(vin_info=result_text)
+    await state.set_state(UserState.waiting_for_support_message)
+    await message.answer(result_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]]))
 
-# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ (С БЕЗОПАСНОЙ ОТПРАВКОЙ СООБЩЕНИЙ) ---
+# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ ---
 @dp.callback_query(F.data == "car_catalog_start")
 async def start_car_catalog(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.choosing_make)
@@ -444,7 +459,7 @@ async def catalog_handler(callback: CallbackQuery, state: FSMContext):
 @dp.message(UserState.waiting_for_article)
 async def process_article(message: Message, state: FSMContext):
     article = message.text.strip()
-    wait_msg = await message.answer(f"⏳ Ищу деталь <code>{article}</code>...")
+    wait_msg = await message.answer(f"⏳ Выполняем проценку артикула <code>{article}</code> по базам поставщиков...")
     
     result_text, offers = await search_part_api(article)
     await wait_msg.delete() 
@@ -455,7 +470,6 @@ async def process_article(message: Message, state: FSMContext):
         keyboard = []
         row = []
         for i, offer in enumerate(offers):
-            # Компактный формат для идеального размещения текста в кнопках
             btn_text = f"{offer['brand']} | {offer['article']} | {offer['price']}₽"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
             if len(row) == 2:
@@ -468,7 +482,7 @@ async def process_article(message: Message, state: FSMContext):
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
         await message.answer(
-            f"{result_text}\n\n👇 <b>Выберите товар ниже, чтобы добавить его в корзину:</b>", 
+            f"{result_text}\n\n👇 <b>Нажмите на кнопку с товаром для добавления в корзину:</b>", 
             parse_mode="HTML", 
             reply_markup=markup
         )
@@ -489,7 +503,7 @@ async def add_to_cart_handler(callback: CallbackQuery):
         user_carts[user_id].append(offer)
         await callback.answer(f"✅ {offer['brand']} ({offer['price']} ₽) успешно добавлен в корзину!", show_alert=True)
     else:
-        await callback.answer("❌ Ошибка. Товар устарел, сделайте поиск заново.", show_alert=True)
+        await callback.answer("❌ Ошибка. Результаты поиска устарели, повторите запрос.", show_alert=True)
 
 # --- ПРОСМОТР КОРЗИНЫ ---
 @dp.callback_query(F.data == "view_cart")
