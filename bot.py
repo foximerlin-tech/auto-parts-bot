@@ -260,7 +260,32 @@ async def smart_router(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # 1. Проверяем клик по артикулу из предыдущего поиска для добавления в корзину
+    # 0. Если пользователь находится в режиме ожидания уточнения мотора после VIN
+    current_state = await state.get_state()
+    if current_state == UserState.waiting_for_engine_details.state:
+        is_article_check = len(text) <= 25 and re.match(r'^[a-zA-Z0-9\-\.]+$', text) and any(char.isdigit() for char in text)
+        is_vin_check = len(text.upper()) == 17 and text.upper().isalnum()
+        
+        if not is_article_check and not is_vin_check and "подбор" not in text.lower():
+            await state.update_data(engine_info=text)
+            await state.clear()
+            await message.answer(f"✅ Двигатель зафиксирован: <b>{text}</b>.\n\nТеперь отправьте артикул нужной детали для поиска:", parse_mode="HTML")
+            return
+
+    # 1. Сначала проверяем, является ли сообщение 17-значным VIN-кодом
+    clean_text = text.upper()
+    if len(clean_text) == 17 and clean_text.isalnum():
+        await state.clear()
+        wait_msg = await message.answer("⏳ Проверяем VIN-код...")
+        result_text = await decode_vin_vpic(clean_text)
+        await wait_msg.delete()
+        
+        await state.update_data(vin_info=result_text, vin_code=clean_text)
+        await state.set_state(UserState.waiting_for_engine_details)
+        await message.answer(result_text, parse_mode="HTML")
+        return
+
+    # 2. Проверяем клик по артикулу из предыдущего поиска для добавления в корзину
     user_offers = last_search.get(user_id, [])
     matched_offer = None
     for offer in user_offers:
@@ -274,7 +299,7 @@ async def smart_router(message: Message, state: FSMContext):
         await message.answer(f"✅ Добавлено в корзину: <b>{matched_offer['brand']}</b> (<code>{matched_offer['article']}</code>) за <b>{matched_offer['price']} ₽</b>\n\nНапишите /cart для оформления заказа.", parse_mode="HTML")
         return
 
-    # 2. Проверяем, похоже ли сообщение на артикул (или если пользователь написал запрос на подбор вместо мотора)
+    # 3. Проверяем, похоже ли сообщение на артикул детали
     is_article = len(text) <= 25 and re.match(r'^[a-zA-Z0-9\-\.]+$', text) and any(char.isdigit() for char in text)
     
     if is_article:
@@ -291,31 +316,7 @@ async def smart_router(message: Message, state: FSMContext):
         await message.answer(result_text, parse_mode="HTML")
         return
 
-    # 3. Проверяем, находится ли пользователь в режиме ожидания уточнения мотора после VIN
-    current_state = await state.get_state()
-    if current_state == UserState.waiting_for_engine_details.state:
-        if "подбор" in text.lower():
-            await message.answer("⚠️ Пожалуйста, укажите код или объем двигателя (например, <i>BZB</i> или <i>1.8 TSI</i>), либо отправьте артикул детали.", parse_mode="HTML")
-            return
-            
-        await state.update_data(engine_info=text)
-        await state.clear()
-        await message.answer(f"✅ Двигатель зафиксирован: <b>{text}</b>.\n\nТеперь отправьте артикул нужной детали для поиска:", parse_mode="HTML")
-        return
-
-    # 4. Проверяем, является ли сообщение 17-значным VIN-кодом
-    clean_text = text.upper()
-    if len(clean_text) == 17 and clean_text.isalnum():
-        wait_msg = await message.answer("⏳ Проверяем VIN-код...")
-        result_text = await decode_vin_vpic(clean_text)
-        await wait_msg.delete()
-        
-        await state.update_data(vin_info=result_text, vin_code=clean_text)
-        await state.set_state(UserState.waiting_for_engine_details)
-        await message.answer(result_text, parse_mode="HTML")
-        return
-
-    # 5. Во всех остальных случаях — отправляем сообщение менеджеру
+    # 4. Во всех остальных случаях — отправляем сообщение менеджеру
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     admin_text = f"📩 <b>Обращение от {username}</b> (ID: <code>{user_id}</code>):\n\n{text}"
     
