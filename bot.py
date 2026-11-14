@@ -82,16 +82,18 @@ async def decode_vin_vpic(vin: str) -> str:
     if make in ["null", None, "Неизвестно"]: return "❌ Автомобиль не найден."
     return f"🚗 Ваш автомобиль: {make} {model} ({year} г.в.)"
 
-# --- API КАТАЛОГА АВТОМОБИЛЕЙ ---
+# --- API КАТАЛОГА АВТОМОБИЛЕЙ (С ЛОГИРОВАНИЕМ ДЛЯ ДИАГНОСТИКИ) ---
 async def api_get_car_makes():
     url = f"https://api.pr-lg.ru/catalog/makes?secret={API_SECRET}"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
+                print(f"🚗 Статус ответа API марок: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except: pass
+        except Exception as e:
+            print(f"❌ Ошибка запроса марок: {e}")
         return []
 
 async def api_get_car_models(make_id: str):
@@ -99,10 +101,12 @@ async def api_get_car_models(make_id: str):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
+                print(f"🚙 Статус ответа API моделей: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except: pass
+        except Exception as e:
+            print(f"❌ Ошибка запроса моделей: {e}")
         return []
 
 async def api_get_car_modifications(model_id: str):
@@ -110,10 +114,12 @@ async def api_get_car_modifications(model_id: str):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, ssl=False) as resp:
+                print(f"⚙️ Статус ответа API модификаций: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", data)
-        except: pass
+        except Exception as e:
+            print(f"❌ Ошибка запроса модификаций: {e}")
         return []
 
 # --- ПОИСК ЗАПЧАСТЕЙ ---
@@ -431,7 +437,7 @@ async def process_modification_choice(callback: CallbackQuery, state: FSMContext
     )
     await callback.answer()
 
-# --- ПОИСК ПО АРТИКУЛУ С КНОПКАМИ СЕТКОЙ (Бренд - Артикул - Цена) ---
+# --- ПОИСК ПО АРТИКУЛУ С КОМПАКТНЫМИ КНОПКАМИ ---
 @dp.callback_query(F.data == "catalog")
 async def catalog_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
@@ -452,7 +458,8 @@ async def process_article(message: Message, state: FSMContext):
         keyboard = []
         row = []
         for i, offer in enumerate(offers):
-            btn_text = f"{offer['brand']} ({offer['article']}) — {offer['price']} ₽"
+            # Используем компактный разделитель | для идеального размещения текста в кнопках
+            btn_text = f"{offer['brand']} | {offer['article']} | {offer['price']}₽"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
             if len(row) == 2:
                 keyboard.append(row)
