@@ -21,13 +21,8 @@ user_carts = {}
 last_search = {}   
 
 class UserState(StatesGroup):
-    waiting_for_vin = State()          
-    waiting_for_engine_details = State() # Ожидание уточнения мотора/КПП после VIN
-    waiting_for_article = State()      
+    waiting_for_engine_details = State() # Ожидание уточнения мотора после VIN
     waiting_for_support_message = State() 
-    choosing_make = State()
-    choosing_model = State()
-    choosing_modification = State()
 
 class AdminState(StatesGroup):
     waiting_for_reply = State()
@@ -63,7 +58,7 @@ def get_brand_tier(brand_name: str) -> int:
     elif b_upper in MEDIUM_BRANDS: return 2
     else: return 3
 
-# --- ПОИСК АВТО ПО VIN (ЭКСПЕРТНЫЙ ФОРМАТ) ---
+# --- ПОИСК АВТО ПО VIN ---
 async def decode_vin_vpic(vin: str) -> str:
     url = f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json"
     async with aiohttp.ClientSession() as session:
@@ -84,54 +79,13 @@ async def decode_vin_vpic(vin: str) -> str:
     report = (
         f"🔍 <b>Разбор по вашему VIN <code>{vin}</code>:</b>\n\n"
         f"<b>1. Автомобиль и параметры</b>\n"
-        f"• VIN валиден, производитель: <b>{make} {model}</b>.\n"
-        f"• Год выпуска: <b>{year} г.в.</b>\n"
-        f"• Точная модификация и код двигателя по базовому декодеру требуют верификации.\n\n"
-        f"<b>2. Статус подбора</b>\n"
-        f"• Прямой OEM-каталог производителя не подключён. Подбор ведется по кросс-номерам и базам поставщиков.\n\n"
-        f"<b>3. Что нужно от вас для продолжения:</b>\n"
-        f"1. Напишите точный код или объем двигателя (например, <i>1.4 TSI, BZB, 1.6 MPI</i>).\n"
-        f"2. Укажите тип КПП (механика / автомат).\n"
-        f"3. Напишите артикул или название детали, которую нужно подобрать.\n\n"
-        f"👇 <i>Жду параметры вашего двигателя, чтобы зафиксировать применимость!</i>"
+        f"• Производитель: <b>{make} {model}</b> ({year} г.в.).\n\n"
+        f"<b>2. Что нужно для продолжения:</b>\n"
+        f"Напишите объем или код двигателя (например, <i>1.4 TSI, BZB, 1.6 MPI</i>), чтобы зафиксировать применимость."
     )
     return report
 
-# --- API КАТАЛОГА АВТОМОБИЛЕЙ ---
-async def api_get_car_makes():
-    url = f"https://api.pr-lg.ru/catalog/makes?secret={API_SECRET}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, ssl=False) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", data)
-        except: pass
-        return []
-
-async def api_get_car_models(make_id: str):
-    url = f"https://api.pr-lg.ru/catalog/models?secret={API_SECRET}&make_id={make_id}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, ssl=False) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", data)
-        except: pass
-        return []
-
-async def api_get_car_modifications(model_id: str):
-    url = f"https://api.pr-lg.ru/catalog/vehicles?secret={API_SECRET}&model_id={model_id}"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, ssl=False) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", data)
-        except: pass
-        return []
-
-# --- ЭКСПЕРТНЫЙ ПОИСК ЗАПЧАСТЕЙ ПО АРТИКУЛУ ---
+# --- ПОИСК ЗАПЧАСТЕЙ ПО АРТИКУЛУ ---
 async def search_part_api(requested_article: str, engine_info: str = ""):
     url_products = "https://api.pr-lg.ru/search/products"
     url_crosses = "https://api.pr-lg.ru/search/crosses"
@@ -235,13 +189,9 @@ async def search_part_api(requested_article: str, engine_info: str = ""):
                     else:
                         analogs.append(item)
 
-                # Формируем экспертный отчет в вашем стиле
-                engine_note = f"Двигатель верифицирован: <b>{engine_info}</b>." if engine_info else "Двигатель не верифицирован (требуется проверка)."
+                engine_note = f"Двигатель верифицирован: <b>{engine_info}</b>." if engine_info else "Двигатель не верифицирован."
                 answer = f"По артикулу <code>{requested_article}</code> — это <b>{target_desc}</b> ({target_brand}). Применимость: {engine_note}\n\n"
-                answer += f"<b>1. Параметры и подбор</b>\n"
-                answer += f"• Запрошенный артикул: <code>{requested_article}</code> ({target_brand})\n"
-                answer += f"• Статус: кандидат на проверку по каталогу.\n\n"
-                answer += f"<b>2. Доступность у поставщиков и аналоги:</b>\n\n"
+                answer += f"<b>Доступность у поставщиков и аналоги:</b>\n\n"
                 
                 best_exact = None
                 for em in exact_matches:
@@ -251,8 +201,8 @@ async def search_part_api(requested_article: str, engine_info: str = ""):
                 has_offers = False
                 if best_exact:
                     has_offers = True
-                    answer += f"<b>{best_exact['warehouse']}</b>\n"
-                    answer += f"• {best_exact['brand']} <code>{best_exact['article']}</code>, {best_exact['name']} — <b>{best_exact['price']} ₽</b>, остаток {best_exact['stock']} шт., срок: {best_exact['delivery']}\n\n"
+                    answer += f"<b>Срок поставки: {best_exact['delivery']}</b> | Склад: {best_exact['warehouse']}\n"
+                    answer += f"• <b>{best_exact['brand']}</b> <code>{best_exact['article']}</code> — <b>{best_exact['price']} ₽</b> (остаток: {best_exact['stock']} шт.)\n\n"
                     offers_data.append({k: v for k, v in best_exact.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                 
                 processed_analogs = [get_best_offer(an) for an in analogs]
@@ -271,7 +221,7 @@ async def search_part_api(requested_article: str, engine_info: str = ""):
                     count = 0
                     for item in tier_items:
                         if count >= 3: break 
-                        answer += f"• {item['brand']} <code>{item['article']}</code> — <b>{item['price']} ₽</b>, остаток {item['stock']} шт., 🚚 {item['delivery']}\n"
+                        answer += f"• ⏱ <b>Срок: {item['delivery']}</b> | <b>{item['brand']}</b> <code>{item['article']}</code> — <b>{item['price']} ₽</b> (остаток: {item['stock']} шт.)\n"
                         offers_data.append({k: v for k, v in item.items() if k not in ['is_own', 'delivery_hours', 'raw_price', 'tier']})
                         count += 1
                         has_offers = True
@@ -280,218 +230,102 @@ async def search_part_api(requested_article: str, engine_info: str = ""):
                 if not has_offers:
                     return f"⚠️ Деталь найдена, но нет предложений в наличии.", []
                     
-                answer += "💡 <i>Нажмите на кнопку нужного товара ниже, чтобы положить его в корзину. Вы можете скопировать артикул нажатием на него.</i>"
+                answer += "💡 <i>Нажмите на артикул в тексте выше, чтобы добавить этот товар в корзину.</i>"
                 return answer.strip(), offers_data
 
         except Exception as e:
             return f"❌ Ошибка при поиске: {e}", []
 
-# ---------------- КЛАВИАТУРА ----------------
-main_menu = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🔍 Подбор по VIN (Экспертный разбор)", callback_data="vin")],
-    [InlineKeyboardButton(text="🛠 Поиск по артикулу", callback_data="catalog")],
-    [InlineKeyboardButton(text="🚗 Подбор по автомобилю", callback_data="car_catalog_start")],
-    [InlineKeyboardButton(text="🛒 Моя корзина", callback_data="view_cart")],
-    [InlineKeyboardButton(text="📞 Связь с менеджером", callback_data="support")]
-])
-
-# ---------------- ОБРАБОТЧИКИ МЕНЮ ----------------
+# ---------------- СТАРТ БЕЗ МЕНЮ ----------------
 @dp.message(CommandStart())
-@dp.callback_query(F.data.in_({"back_to_menu", "catalog_back"}))
-async def start_handler(update, state: FSMContext):
+async def start_handler(message: Message, state: FSMContext):
     await state.clear()
     welcome_text = (
-        "👋 <b>Добро пожаловать в экспертный магазин автозапчастей!</b>\n\n"
-        "Выберите нужное действие в меню ниже:\n\n"
-        "<i>(💡 Нажимайте на артикулы в тексте, чтобы копировать их)</i>"
+        "👋 <b>Магазин автозапчастей на связи!</b>\n\n"
+        "<b>Инструкция по работе:</b>\n"
+        "• Отправьте <b>17-значный VIN-код</b> — для подбора по авто.\n"
+        "• Отправьте <b>артикул детали</b> — для мгновенной проценки.\n"
+        "• Отправьте <b>любое текстовое сообщение</b> — чтобы связаться с менеджером.\n"
+        "• Напишите /cart — для просмотра корзины."
     )
-    logo_url = "https://images.unsplash.com/photo-1530046339160-ce3e530c7d2f?q=80&w=800&auto=format&fit=crop"
-    
-    if isinstance(update, Message):
-        try: await update.answer_photo(photo=logo_url, caption=welcome_text, reply_markup=main_menu, parse_mode="HTML")
-        except: await update.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
-    else:
-        try: await update.message.edit_text(welcome_text, reply_markup=main_menu, parse_mode="HTML")
-        except: await update.message.answer(welcome_text, reply_markup=main_menu, parse_mode="HTML")
-        await update.answer()
+    await message.answer(welcome_text, parse_mode="HTML")
 
-@dp.message(Command("cancel"))
-@dp.message(F.text.lower() == "отмена")
-async def cancel_handler(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Действие отменено. Вы вернулись в главное меню 🏠", reply_markup=main_menu)
+@dp.message(Command("cart"))
+async def cart_command(message: Message, state: FSMContext):
+    await view_cart_handler(message)
 
-# --- ВОРОНКА 1: ПОИСК ПО VIN ---
-@dp.callback_query(F.data == "vin")
-async def vin_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.waiting_for_vin)
-    await callback.message.answer("🚗 Пожалуйста, отправьте 17-значный VIN-код вашего автомобиля:")
-    await callback.answer()
-
-@dp.message(UserState.waiting_for_vin)
-async def process_vin(message: Message, state: FSMContext):
-    user_vin = message.text.strip().upper()
-    if len(user_vin) != 17:
-        await message.answer("⚠️ VIN-код должен состоять ровно из 17 символов. Попробуйте еще раз.")
-        return 
+# --- УМНЫЙ РОУТЕР СООБЩЕНИЙ ---
+@dp.message()
+async def smart_router(message: Message, state: FSMContext):
+    text = message.text.strip()
+    user_id = message.from_user.id
     
-    wait_msg = await message.answer("⏳ Проверяем VIN-код...")
-    result_text = await decode_vin_vpic(user_vin)
-    await wait_msg.delete()
-    
-    # Сохраняем VIN и переводим в режим ожидания параметров двигателя
-    await state.update_data(vin_info=result_text, vin_code=user_vin)
-    await state.set_state(UserState.waiting_for_engine_details)
-    await message.answer(result_text, parse_mode="HTML")
-
-@dp.message(UserState.waiting_for_engine_details)
-async def process_engine_details(message: Message, state: FSMContext):
-    engine_text = message.text.strip()
-    await state.update_data(engine_info=engine_text)
-    
-    await state.set_state(UserState.waiting_for_article)
-    await message.answer(
-        f"✅ Отлично! Двигатель верифицирован как: <b>{engine_text}</b>.\n\n"
-        f"🛠 Теперь отправьте артикул нужной детали (например, <code>030115561AN</code>), и я выдам подробный экспертный расклад по наличию и ценам:",
-        parse_mode="HTML"
-    )
-
-# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ ---
-@dp.callback_query(F.data == "car_catalog_start")
-async def start_car_catalog(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.choosing_make)
-    await callback.message.answer("⏳ Загружаю список марок автомобилей...")
-    
-    makes = await api_get_car_makes()
-    if not makes:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]])
-        await callback.message.answer("⚠️ Каталог марок временно недоступен.", reply_markup=kb)
-        await callback.answer()
+    # 1. Проверяем клик по артикулу из предыдущего поиска для добавления в корзину
+    user_offers = last_search.get(user_id, [])
+    matched_offer = None
+    for offer in user_offers:
+        if text.upper().replace(" ", "") == offer['article'].upper().replace(" ", ""):
+            matched_offer = offer
+            break
+            
+    if matched_offer:
+        if user_id not in user_carts: user_carts[user_id] = []
+        user_carts[user_id].append(matched_offer)
+        await message.answer(f"✅ Добавлено в корзину: <b>{matched_offer['brand']}</b> (<code>{matched_offer['article']}</code>) за <b>{matched_offer['price']} ₽</b>\n\nНапишите /cart для оформления заказа.", parse_mode="HTML")
         return
 
-    keyboard = []
-    row = []
-    for make in makes[:30]:
-        make_id = str(make.get("id", ""))
-        make_name = make.get("name", "Марка")
-        row.append(InlineKeyboardButton(text=make_name, callback_data=f"make_{make_id}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
-    keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
-    
-    await callback.message.answer("🚗 <b>Выберите марку вашего автомобиля:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
+    # 2. Проверяем, находится ли пользователь в режиме ожидания уточнения мотора после VIN
+    current_state = await state.get_state()
+    if current_state == UserState.waiting_for_engine_details.state:
+        await state.update_data(engine_info=text)
+        await message.answer(f"✅ Двигатель зафиксирован: <b>{text}</b>.\n\nТеперь отправьте артикул нужной детали:", parse_mode="HTML")
+        return
 
-@dp.callback_query(UserState.choosing_make, F.data.startswith("make_"))
-async def process_make_choice(callback: CallbackQuery, state: FSMContext):
-    make_id = callback.data.split("_")[1]
-    await state.update_data(make_id=make_id)
-    models = await api_get_car_models(make_id)
-    
-    keyboard = []
-    row = []
-    for model in models[:30]:
-        model_id = str(model.get("id", ""))
-        model_name = model.get("name", "Модель")
-        row.append(InlineKeyboardButton(text=model_name, callback_data=f"model_{model_id}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
-    keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="car_catalog_start")])
-    
-    await callback.message.answer("🚙 <b>Выберите модель:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-@dp.callback_query(UserState.choosing_model, F.data.startswith("model_"))
-async def process_model_choice(callback: CallbackQuery, state: FSMContext):
-    model_id = callback.data.split("_")[1]
-    await state.update_data(model_id=model_id)
-    modifications = await api_get_car_modifications(model_id)
-    
-    keyboard = []
-    for mod in modifications[:20]:
-        mod_id = str(mod.get("id", ""))
-        mod_name = f"{mod.get('name', '')} ({mod.get('power', '')} л.с.)"
-        keyboard.append([InlineKeyboardButton(text=mod_name, callback_data=f"mod_{mod_id}")])
-    keyboard.append([InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")])
-    
-    await callback.message.answer("⚙️ <b>Выберите модификацию / двигатель:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("mod_"))
-async def process_modification_choice(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.waiting_for_article)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
-    await callback.message.answer("✅ Автомобиль зафиксирован! Теперь отправьте артикул детали для подбора:", reply_markup=kb)
-    await callback.answer()
-
-# --- ПОИСК ПО АРТИКУЛУ ---
-@dp.callback_query(F.data == "catalog")
-async def catalog_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.waiting_for_article)
-    await callback.message.answer("Введите артикул детали (например, <code>030115561AN</code>):", parse_mode="HTML")
-    await callback.answer()
-
-@dp.message(UserState.waiting_for_article)
-async def process_article(message: Message, state: FSMContext):
-    article = message.text.strip()
-    data = await state.get_data()
-    engine_info = data.get("engine_info", "")
-    
-    wait_msg = await message.answer(f"⏳ Анализируем артикул <code>{article}</code> по базам поставщиков...")
-    
-    result_text, offers = await search_part_api(article, engine_info)
-    await wait_msg.delete() 
-    
-    if offers:
-        last_search[message.from_user.id] = offers
+    # 3. Проверяем, является ли сообщение 17-значным VIN-кодом
+    clean_text = text.upper()
+    if len(clean_text) == 17 and clean_text.isalnum():
+        wait_msg = await message.answer("⏳ Проверяем VIN-код...")
+        result_text = await decode_vin_vpic(clean_text)
+        await wait_msg.delete()
         
-        keyboard = []
-        row = []
-        for i, offer in enumerate(offers):
-            btn_text = f"{offer['brand']} | {offer['article']} | {offer['price']}₽"
-            row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row: keyboard.append(row)
-            
-        keyboard.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")])
-        markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        await state.update_data(vin_info=result_text, vin_code=clean_text)
+        await state.set_state(UserState.waiting_for_engine_details)
+        await message.answer(result_text, parse_mode="HTML")
+        return
+
+    # 4. Проверяем, похоже ли сообщение на артикул (короткий буквенно-цифровой код без пробелов или с дефисами)
+    if len(text) <= 25 and re.match(r'^[a-zA-Z0-9\-\.]+$', text) and any(char.isdigit() for char in text):
+        data = await state.get_data()
+        engine_info = data.get("engine_info", "")
         
-        await message.answer(f"{result_text}\n\n👇 Выберите вариант для добавления в корзину:", parse_mode="HTML", reply_markup=markup)
-    else:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
-        await message.answer(f"{result_text}", parse_mode="HTML", reply_markup=kb)
+        wait_msg = await message.answer(f"⏳ Процениваем артикул <code>{text}</code>...")
+        result_text, offers = await search_part_api(text, engine_info)
+        await wait_msg.delete()
+        
+        if offers:
+            last_search[user_id] = offers
+        await message.answer(result_text, parse_mode="HTML")
+        return
 
-# Добавление в корзину
-@dp.callback_query(F.data.startswith("add_cart_"))
-async def add_to_cart_handler(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    offer_idx = int(callback.data.split("_")[2])
-    user_offers = last_search.get(user_id, [])
+    # 5. Во всех остальных случаях — отправляем сообщение менеджеру
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    admin_text = f"📩 <b>Обращение от {username}</b> (ID: <code>{user_id}</code>):\n\n{text}"
     
-    if offer_idx < len(user_offers):
-        offer = user_offers[offer_idx]
-        if user_id not in user_carts: user_carts[user_id] = []
-        user_carts[user_id].append(offer)
-        await callback.answer(f"✅ Добавлено: {offer['brand']} ({offer['price']} ₽)", show_alert=True)
-    else:
-        await callback.answer("❌ Товар устарел, сделайте поиск заново.", show_alert=True)
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Ответить клиенту", callback_data=f"reply_{user_id}")]])
+    
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=reply_markup)
+        await message.answer("✅ Ваше сообщение передано менеджеру. Ожидайте ответ!")
+    except:
+        await message.answer("❌ Ошибка отправки сообщения менеджеру.")
 
-# --- КОРЗИНА И ОПЛАТА ---
-@dp.callback_query(F.data == "view_cart")
-async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    user_id = callback.from_user.id
+# --- ПРОСМОТР КОРЗИНЫ ---
+async def view_cart_handler(message: Message):
+    user_id = message.from_user.id
     cart = user_carts.get(user_id, [])
     
     if not cart:
-        await callback.message.answer("🛒 Ваша корзина пуста.", reply_markup=main_menu)
-        await callback.answer()
+        await message.answer("🛒 Ваша корзина пуста.")
         return
         
     text = "<b>🛒 ВАША КОРЗИНА:</b>\n\n"
@@ -504,17 +338,15 @@ async def view_cart_handler(callback: CallbackQuery, state: FSMContext):
     text += f"<b>Итого к оплате: {total_sum:,} ₽</b>\n".replace(",", " ")
     cart_menu = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Оформить и Оплатить", callback_data="checkout")],
-        [InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="clear_cart")],
-        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="clear_cart")]
     ])
     
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
-    await callback.answer()
+    await message.answer(text, parse_mode="HTML", reply_markup=cart_menu)
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart_handler(callback: CallbackQuery):
     user_carts[callback.from_user.id] = []
-    await callback.message.answer("🗑 Корзина очищена.", reply_markup=main_menu)
+    await callback.message.answer("🗑 Корзина очищена.")
     await callback.answer()
 
 @dp.callback_query(F.data == "checkout")
@@ -532,35 +364,19 @@ async def checkout_handler(callback: CallbackQuery):
         except: pass
     admin_text += f"\n💰 <b>ИТОГО: {total_sum:,} ₽</b>".replace(",", " ")
     
-    await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]]))
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"reply_{user_id}")]])
+    await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=reply_markup)
     user_carts[user_id] = []
     
     req_text = (
         f"🎉 <b>Заказ оформлен!</b>\nК оплате: <b>{total_sum:,} ₽</b>\n\n".replace(",", " ") +
         f"💳 <b>Реквизиты СБП (Т-Банк / Сбер):</b>\nТелефон: <code>+7 (999) 123-45-67</code>\n\n"
-        f"👉 <i>Пришлите скриншот чека в ответном сообщении!</i>"
+        f"👉 <i>Пришлите скриншот чека в чат для подтверждения!</i>"
     )
-    await callback.message.answer(req_text, parse_mode="HTML", reply_markup=main_menu)
+    await callback.message.answer(req_text, parse_mode="HTML")
     await callback.answer()
 
-# --- СВЯЗЬ С МЕНЕДЖЕРОМ ---
-@dp.callback_query(F.data == "support")
-async def support_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.waiting_for_support_message)
-    await callback.message.answer("Напишите ваш вопрос или оставьте запрос для менеджера:")
-    await callback.answer()
-
-@dp.message(UserState.waiting_for_support_message)
-async def process_support_message(message: Message, state: FSMContext):
-    user_text = message.text or message.caption or "<i>[Фото без текста]</i>"
-    user_id = message.from_user.id
-    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
-    
-    admin_text = f"📩 <b>Обращение от {username}</b> (ID: <code>{user_id}</code>):\n\n{user_text}"
-    await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{user_id}")]]))
-    await message.answer("✅ Ваше сообщение передано менеджеру!", reply_markup=main_menu)
-    await state.clear()
-
+# --- СВЯЗЬ АДМИНА С КЛИЕНТОМ ---
 @dp.callback_query(F.data.startswith("reply_"), F.from_user.id == ADMIN_ID)
 async def admin_reply_callback(callback: CallbackQuery, state: FSMContext):
     client_id = int(callback.data.split("_")[1])
@@ -582,8 +398,8 @@ async def send_reply_to_client(message: Message, state: FSMContext):
 
 async def main():
     await start_web_server()
-    await bot.set_my_commands([BotCommand(command="start", description="Главное меню"), BotCommand(command="cancel", description="Отмена")])
-    print("Бот запущен!")
+    await bot.set_my_commands([BotCommand(command="start", description="Инструкция"), BotCommand(command="cart", description="Корзина")])
+    print("Бот запущен в режиме умного роутинга без меню!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
