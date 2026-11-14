@@ -336,14 +336,13 @@ async def process_vin(message: Message, state: FSMContext):
         await state.set_state(UserState.waiting_for_support_message)
         await message.answer(f"{result_text}\n\n👇 <b>Напишите списком, какие запчасти вам нужны:</b>", parse_mode="HTML")
 
-# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ ---
+# --- ПОШАГОВЫЙ ПОДБОР ПО АВТОМОБИЛЮ (С БЕЗОПАСНОЙ ОТПРАВКОЙ СООБЩЕНИЙ) ---
 @dp.callback_query(F.data == "car_catalog_start")
 async def start_car_catalog(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.choosing_make)
-    wait_msg = await callback.message.edit_text("⏳ Загружаю список марок автомобилей...")
+    await callback.message.answer("⏳ Загружаю список марок автомобилей...")
     
     makes = await api_get_car_makes()
-    await wait_msg.delete()
     
     if not makes:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]])
@@ -373,9 +372,8 @@ async def process_make_choice(callback: CallbackQuery, state: FSMContext):
     make_id = callback.data.split("_")[1]
     await state.update_data(make_id=make_id)
     
-    wait_msg = await callback.message.edit_text("⏳ Загружаю модели...")
+    await callback.message.answer("⏳ Загружаю модели...")
     models = await api_get_car_models(make_id)
-    await wait_msg.delete()
     
     if not models:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к маркам", callback_data="car_catalog_start")]])
@@ -404,9 +402,8 @@ async def process_model_choice(callback: CallbackQuery, state: FSMContext):
     model_id = callback.data.split("_")[1]
     await state.update_data(model_id=model_id)
     
-    wait_msg = await callback.message.edit_text("⏳ Загружаю модификации и двигатели...")
+    await callback.message.answer("⏳ Загружаю модификации и двигатели...")
     modifications = await api_get_car_modifications(model_id)
-    await wait_msg.delete()
     
     if not modifications:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_menu")]])
@@ -429,7 +426,7 @@ async def process_model_choice(callback: CallbackQuery, state: FSMContext):
 async def process_modification_choice(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserState.waiting_for_article)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_menu")]])
-    await callback.message.edit_text(
+    await callback.message.answer(
         "✅ <b>Автомобиль успешно выбран!</b>\n\n"
         "Теперь отправьте артикул нужной детали, и бот выдаст актуальные цены и аналоги:",
         parse_mode="HTML",
@@ -458,7 +455,7 @@ async def process_article(message: Message, state: FSMContext):
         keyboard = []
         row = []
         for i, offer in enumerate(offers):
-            # Используем компактный разделитель | для идеального размещения текста в кнопках
+            # Компактный формат для идеального размещения текста в кнопках
             btn_text = f"{offer['brand']} | {offer['article']} | {offer['price']}₽"
             row.append(InlineKeyboardButton(text=btn_text, callback_data=f"add_cart_{i}"))
             if len(row) == 2:
